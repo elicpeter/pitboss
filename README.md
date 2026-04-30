@@ -66,9 +66,9 @@ To actually drive the agent you also need:
 
 If you plan to swap backends, install whichever CLI you intend to use instead of (or in addition to) `claude`:
 
-- **`codex`** — only if `[agent] backend = "codex"`. See [Agent backends](#agent-backends).
-- **`aider`** — only if `[agent] backend = "aider"`.
-- **`gemini`** — only if `[agent] backend = "gemini"`.
+- **`codex`**, only if `[agent] backend = "codex"`. See [Agent backends](#agent-backends).
+- **`aider`**, only if `[agent] backend = "aider"`.
+- **`gemini`**, only if `[agent] backend = "gemini"`.
 
 ## Quickstart
 
@@ -194,7 +194,7 @@ extra_args = ["--flag", "value"]      # appended to every invocation
 model      = "<model-id>"             # optional, beats [models].<role>
 ```
 
-Omit `[agent]` entirely and pitboss runs with `claude_code` and PATH-resolved `claude` — same as it always has.
+Omit `[agent]` entirely and pitboss runs with `claude_code` and PATH-resolved `claude`, same as it always has.
 
 ### Claude Code (default)
 
@@ -207,7 +207,7 @@ The reference backend, built on Anthropic's Claude Code CLI. Streams structured 
   backend = "claude_code"
 
   [agent.claude_code]
-  # binary, extra_args, model — all optional
+  # binary, extra_args, model are all optional
   ```
 - **Limitations:** none known.
 

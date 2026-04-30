@@ -1053,7 +1053,7 @@ fn log_event_line(event: &Event) {
                 col(
                     c,
                     style::BOLD_WHITE,
-                    &format!("phase {phase_id} ({title}) — attempt {attempt}")
+                    &format!("phase {phase_id} ({title}), attempt {attempt}")
                 )
             );
             if c {

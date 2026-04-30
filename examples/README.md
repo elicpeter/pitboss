@@ -20,11 +20,11 @@ pitboss init
 cp /path/to/pitboss/examples/todo-cli/plan.md plan.md
 cp /path/to/pitboss/examples/todo-cli/pitboss.toml pitboss.toml
 
-# Sanity check — exercises the runner end-to-end with no token spend
+# Sanity check: exercises the runner end-to-end with no token spend
 pitboss run --dry-run
 
 # When ready, run for real
 pitboss run
 ```
 
-`pitboss run --dry-run` is always the recommended first step on an example: it confirms the plan parses, the per-run branch creates cleanly, and the event stream renders the way you expect — without invoking the agent.
+`pitboss run --dry-run` is always the recommended first step on an example: it confirms the plan parses, the per-run branch creates cleanly, and the event stream renders the way you expect, all without invoking the agent.

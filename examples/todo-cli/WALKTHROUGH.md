@@ -1,4 +1,4 @@
-# Walkthrough — todo-cli
+# Walkthrough: todo-cli
 
 This is an end-to-end run of the `todo-cli` example. Follow it the first time you use pitboss to get a feel for the loop without surprises.
 
@@ -48,7 +48,7 @@ pitboss run
 
 Watch the streamed output. Each phase will:
 
-1. Print `[pitboss] phase 01 (Cargo skeleton & CLI parsing) — attempt 1`.
+1. Print `[pitboss] phase 01 (Cargo skeleton & CLI parsing), attempt 1`.
 2. Stream the agent's stdout / tool-use lines as `[agent] ...`.
 3. Print `[pitboss] running tests` and the result.
 4. (When `audit.enabled`) Print `[pitboss] phase 01 auditor (total dispatch 2)`.
@@ -83,4 +83,4 @@ git branch -D pitboss/run-<utc>     # delete the per-run branch
 rm .pitboss/state.json              # wipe the state breadcrumb
 ```
 
-`plan.md` and `deferred.md` are preserved — they're never deleted by pitboss.
+`plan.md` and `deferred.md` are preserved. Pitboss never deletes them.
