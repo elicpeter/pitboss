@@ -17,7 +17,9 @@ Foreman is a Rust CLI that drives a coding agent (Claude Code today, others plug
 <div align="center">
   <img src="assets/foreman-tui.png" alt="foreman run --tui dashboard" width="900"/>
 </div>
-<sub align="center"><i>`foreman run --tui`. The dashboard. Phases on the left, live agent output on the right.</i></sub>
+<div align="center">
+  <sub align="center"><i>`foreman run --tui`. The dashboard. Phases on the left, live agent output on the right.</i></sub>
+</div>
 
 ## Contents
 
@@ -75,24 +77,9 @@ foreman status              # check progress at any time
 
 `foreman status` looks like this:
 
-```text
-$ foreman status
-run: 20260429T143022Z (started 2026-04-29T14:30:22+00:00)
-branch: foreman/run-20260429T143022Z
-original branch: main
-plan: phase 02 of 3 — Domain types (2)
-completed: 01
-deferred items: 2 (1 unchecked, 1 checked)
-deferred phases: 1
-tokens: input=12850 output=4210
-  auditor:     input=2100  output=480
-  fixer:       input=1750  output=820
-  implementer: input=9000  output=2910
-cost: $0.5210
-  token budget: 17060/1000000 used, 982940 remaining
-  USD budget:   $0.5210/$5.0000 used, $4.4790 remaining
-last commit: abc1234 [foreman] phase 01: Project foundation
-```
+<div align="center">
+  <img src="assets/foreman-status.png" alt="foreman status output" width="700"/>
+</div>
 
 A few entry points worth knowing:
 
@@ -117,17 +104,12 @@ For each phase in `plan.md`:
 
 Every retry is bounded. When a budget is exhausted the runner halts with a clear reason and `foreman resume` picks up from the same phase.
 
-```text
-phase 02 — Domain types   [halted: plan tampered]
-┌ phases (0/3) ────────────────┐┌ agent output ────────────────────────────────┐
-│· 01 Project foundation       ││[halt] phase 02: plan.md was modified by the  │
-│x 02 Domain types  (1x)       ││agent                                         │
-│· 03 Plan parser              ││                                              │
-│                              ││                                              │
-└──────────────────────────────┘└──────────────────────────────────────────────┘
-q quit   p pause   a abort
-```
-<sub align="center"><i>An agent edited a guarded file. Foreman halts, restores from snapshot, no commit lands.</i></sub>
+<div align="center">
+  <img src="assets/foreman-halt.png" alt="foreman TUI halted on budget exceeded" width="900"/>
+</div>
+<div align="center">
+  <sub align="center"><i>USD budget tripped mid-phase. Foreman halts, no commit lands, `foreman resume` picks up from phase 02.</i></sub>
+</div>
 
 ## Configuration
 
