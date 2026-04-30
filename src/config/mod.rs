@@ -511,10 +511,7 @@ model = \"gemini-2.5-pro\"
             cfg.agent.gemini.binary,
             Some(PathBuf::from("/usr/local/bin/gemini"))
         );
-        assert_eq!(
-            cfg.agent.gemini.extra_args,
-            vec!["--no-stream".to_string()]
-        );
+        assert_eq!(cfg.agent.gemini.extra_args, vec!["--no-stream".to_string()]);
         assert_eq!(cfg.agent.gemini.model.as_deref(), Some("gemini-2.5-pro"));
 
         // The known sub-keys list must cover the new section so canonical

@@ -1,16 +1,15 @@
 ---
 source: src/tui/app.rs
-assertion_line: 570
 expression: snap
 ---
 pitboss  run 20260430T120000Z  branch pitboss/run-20260430T120000Z              
 phase 01 — Project foundation   [idle]                                          
+agent claude-code  model claude-opus-4-7                                        
 ────────────────────────────────────────────────────────────────────────────────
 ┌ phases (0/3) ────────────────┐┌ agent output ────────────────────────────────┐
 │· 01 Project foundation       ││                                              │
 │· 02 Domain types             ││                                              │
 │· 03 Plan parser              ││                                              │
-│                              ││                                              │
 │                              ││                                              │
 │                              ││                                              │
 │                              ││                                              │

@@ -23,6 +23,24 @@ use crate::state::RunState;
 /// reached so the dashboard cannot grow unbounded across a long run.
 pub const OUTPUT_BUFFER_LINES: usize = 1000;
 
+/// Static header chip describing the active agent backend and the per-role
+/// model it dispatches with. The runner can mix models across roles when a
+/// user splits Opus implementer / Sonnet auditor in `pitboss.toml`, so the
+/// header tracks all three and renders the one belonging to the active
+/// activity. `agent_name` mirrors [`crate::agent::Agent::name`].
+#[derive(Debug, Clone)]
+pub struct AgentDisplay {
+    /// Backend identifier (e.g., `"claude-code"`, `"codex"`, `"aider"`,
+    /// `"gemini"`, `"dry-run"`).
+    pub agent_name: String,
+    /// Model the implementer dispatch will use.
+    pub implementer_model: String,
+    /// Model the fixer dispatch will use.
+    pub fixer_model: String,
+    /// Model the auditor dispatch will use.
+    pub auditor_model: String,
+}
+
 /// Per-phase status overlay computed from the runner event stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhaseStatus {
@@ -90,6 +108,10 @@ pub struct App {
     completed: Vec<PhaseId>,
     attempts: HashMap<PhaseId, u32>,
     activity: Activity,
+    /// Active backend / per-role model strings rendered in the header. Static
+    /// for the run; the rendered value tracks `activity` to show the model
+    /// the currently dispatched role is using.
+    agent_display: AgentDisplay,
     output: VecDeque<String>,
     /// User toggled "pause output" — UI-side only; new agent lines are
     /// dropped while paused so the user can read what is on screen without
@@ -103,8 +125,9 @@ pub struct App {
 impl App {
     /// Build a fresh `App` from the snapshot the host runner is about to
     /// drive. `plan` is held as-is (it serves as the static phase list);
-    /// `state` seeds the run-level header fields.
-    pub fn new(plan: Plan, state: RunState) -> Self {
+    /// `state` seeds the run-level header fields; `agent_display` populates
+    /// the static agent / per-role model chip in the header.
+    pub fn new(plan: Plan, state: RunState, agent_display: AgentDisplay) -> Self {
         let mut phase_status = HashMap::new();
         for phase in &plan.phases {
             phase_status.insert(phase.id.clone(), PhaseStatus::Pending);
@@ -120,6 +143,7 @@ impl App {
             completed: state.completed.clone(),
             attempts: state.attempts.clone(),
             activity: Activity::Idle,
+            agent_display,
             output: VecDeque::with_capacity(OUTPUT_BUFFER_LINES),
             paused: false,
             quit_requested: false,
@@ -255,7 +279,7 @@ impl App {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Min(0),
                 Constraint::Length(1),
             ])
@@ -308,9 +332,35 @@ impl App {
             ),
             Span::styled("]", Style::default().fg(Color::DarkGray)),
         ]);
+        let line3 = Line::from(vec![
+            Span::styled("agent ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                self.agent_display.agent_name.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled("model ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                self.current_model().to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]);
         let block = Block::default().borders(Borders::BOTTOM);
-        let para = Paragraph::new(vec![line1, line2]).block(block);
+        let para = Paragraph::new(vec![line1, line2, line3]).block(block);
         frame.render_widget(para, area);
+    }
+
+    /// Resolve the model string the active activity dispatches with. Idle /
+    /// Tests / Done / Halted aren't role-specific so they fall back to the
+    /// implementer's model — what's about to run, or what mostly drove the run.
+    fn current_model(&self) -> &str {
+        match &self.activity {
+            Activity::Fixer(_) => &self.agent_display.fixer_model,
+            Activity::Auditor | Activity::AuditorSkipped => &self.agent_display.auditor_model,
+            _ => &self.agent_display.implementer_model,
+        }
     }
 
     fn render_body(&self, frame: &mut Frame, area: Rect) {
@@ -578,6 +628,15 @@ mod tests {
         )
     }
 
+    fn fixture_agent() -> AgentDisplay {
+        AgentDisplay {
+            agent_name: "claude-code".into(),
+            implementer_model: "claude-opus-4-7".into(),
+            fixer_model: "claude-sonnet-4-6".into(),
+            auditor_model: "claude-sonnet-4-6".into(),
+        }
+    }
+
     fn render_to_string(app: &App, width: u16, height: u16) -> String {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -599,7 +658,7 @@ mod tests {
 
     #[test]
     fn handle_phase_started_marks_phase_running_and_sets_activity() {
-        let mut app = App::new(three_phase_plan(), fresh_state());
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         app.handle_event(Event::PhaseStarted {
             phase_id: pid("01"),
             title: "Project foundation".into(),
@@ -612,7 +671,7 @@ mod tests {
 
     #[test]
     fn fixer_started_sets_activity_with_attempt_index() {
-        let mut app = App::new(three_phase_plan(), fresh_state());
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         app.handle_event(Event::FixerStarted {
             phase_id: pid("01"),
             fixer_attempt: 2,
@@ -624,7 +683,7 @@ mod tests {
 
     #[test]
     fn phase_committed_moves_phase_to_completed() {
-        let mut app = App::new(three_phase_plan(), fresh_state());
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         app.handle_event(Event::PhaseStarted {
             phase_id: pid("01"),
             title: "Project foundation".into(),
@@ -640,7 +699,7 @@ mod tests {
 
     #[test]
     fn phase_halted_marks_failure_and_sets_halted_activity() {
-        let mut app = App::new(three_phase_plan(), fresh_state());
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         app.handle_event(Event::PhaseHalted {
             phase_id: pid("02"),
             reason: HaltReason::TestsFailed("boom".into()),
@@ -654,7 +713,7 @@ mod tests {
 
     #[test]
     fn agent_output_is_appended_until_paused() {
-        let mut app = App::new(three_phase_plan(), fresh_state());
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         app.handle_event(Event::AgentStdout("first line".into()));
         app.handle_event(Event::AgentStdout("second".into()));
         let lines: Vec<&String> = app.output_lines().collect();
@@ -672,8 +731,42 @@ mod tests {
     }
 
     #[test]
+    fn header_model_chip_tracks_active_role() {
+        // The header's `model <id>` chip must follow the dispatched role so a
+        // mixed-model run (e.g., Opus implementer + Sonnet auditor) shows the
+        // truthful identifier at every moment of the dispatch loop.
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
+        // Idle / pre-dispatch falls back to the implementer's model.
+        assert_eq!(app.current_model(), "claude-opus-4-7");
+
+        app.handle_event(Event::PhaseStarted {
+            phase_id: pid("01"),
+            title: "Project foundation".into(),
+            attempt: 1,
+        });
+        assert_eq!(app.current_model(), "claude-opus-4-7");
+
+        app.handle_event(Event::FixerStarted {
+            phase_id: pid("01"),
+            fixer_attempt: 1,
+            attempt: 2,
+        });
+        assert_eq!(app.current_model(), "claude-sonnet-4-6");
+
+        app.handle_event(Event::AuditorStarted {
+            phase_id: pid("01"),
+            attempt: 3,
+        });
+        assert_eq!(app.current_model(), "claude-sonnet-4-6");
+
+        app.handle_event(Event::TestStarted);
+        // Tests don't dispatch a role; chip falls back to implementer.
+        assert_eq!(app.current_model(), "claude-opus-4-7");
+    }
+
+    #[test]
     fn output_buffer_drops_oldest_when_full() {
-        let mut app = App::new(three_phase_plan(), fresh_state());
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         for i in 0..(OUTPUT_BUFFER_LINES + 5) {
             app.handle_event(Event::AgentStdout(format!("line {i}")));
         }
@@ -685,14 +778,14 @@ mod tests {
 
     #[test]
     fn render_initial_layout_80x20() {
-        let app = App::new(three_phase_plan(), fresh_state());
+        let app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         let snap = render_to_string(&app, 80, 20);
         insta::assert_snapshot!("initial_80x20", snap);
     }
 
     #[test]
     fn render_mid_run_with_output_120x30() {
-        let mut app = App::new(three_phase_plan(), fresh_state());
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         app.handle_event(Event::PhaseStarted {
             phase_id: pid("01"),
             title: "Project foundation".into(),
@@ -722,7 +815,7 @@ mod tests {
 
     #[test]
     fn render_halted_state_80x20() {
-        let mut app = App::new(three_phase_plan(), fresh_state());
+        let mut app = App::new(three_phase_plan(), fresh_state(), fixture_agent());
         app.handle_event(Event::PhaseStarted {
             phase_id: pid("02"),
             title: "Domain types".into(),

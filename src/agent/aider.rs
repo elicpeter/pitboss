@@ -476,7 +476,10 @@ mod tests {
 
         // Log file should contain the raw plain-text output for post-mortem.
         let log_text = std::fs::read_to_string(&log).unwrap();
-        assert!(log_text.contains("Applied edit to src/foo.rs"), "{log_text}");
+        assert!(
+            log_text.contains("Applied edit to src/foo.rs"),
+            "{log_text}"
+        );
         assert!(log_text.contains("Commit a1b2c3d"), "{log_text}");
     }
 
@@ -565,7 +568,11 @@ mod tests {
     #[tokio::test]
     async fn build_command_includes_required_flags_and_workdir() {
         let agent = AiderAgent::with_binary("/usr/local/bin/aider")
-            .with_extra_args(vec!["--no-auto-commits".into(), "--map-tokens".into(), "0".into()])
+            .with_extra_args(vec![
+                "--no-auto-commits".into(),
+                "--map-tokens".into(),
+                "0".into(),
+            ])
             .with_model_override("anthropic/opus-4.5");
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
@@ -705,7 +712,8 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
-        let agent = AiderAgent::new().with_extra_args(vec!["--no-auto-commits".into(), "--no-git".into()]);
+        let agent =
+            AiderAgent::new().with_extra_args(vec!["--no-auto-commits".into(), "--no-git".into()]);
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let req = AgentRequest {

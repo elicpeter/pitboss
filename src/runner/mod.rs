@@ -321,6 +321,18 @@ impl<A: Agent, G: Git> Runner<A, G> {
         &self.state
     }
 
+    /// Borrow the loaded config. Used by the TUI to populate the agent /
+    /// per-role model header chip.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Borrow the dispatching agent. Used by the TUI to read
+    /// [`Agent::name`] for the header chip.
+    pub fn agent(&self) -> &A {
+        &self.agent
+    }
+
     /// Borrow the git handle the runner is using. CLI code that needs to call
     /// post-run git operations (e.g., `gh pr create` after a successful run)
     /// reaches in through here so the same shell-vs-mock implementation the

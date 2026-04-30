@@ -162,8 +162,7 @@ impl Agent for CodexAgent {
             while let Some(ev) = raw_rx.recv().await {
                 match ev {
                     AgentEvent::Stdout(line) => {
-                        handle_stdout_line(&line, &outbound, &mut tokens, &mut error_message)
-                            .await;
+                        handle_stdout_line(&line, &outbound, &mut tokens, &mut error_message).await;
                     }
                     AgentEvent::Stderr(line) => {
                         push_tail(&mut stderr_tail, line.clone(), ERROR_TAIL_LINES);
@@ -320,11 +319,7 @@ async fn handle_stdout_line(
             let label = msg
                 .get("command")
                 .and_then(Value::as_array)
-                .and_then(|argv| {
-                    argv.first()
-                        .and_then(Value::as_str)
-                        .map(|s| s.to_string())
-                })
+                .and_then(|argv| argv.first().and_then(Value::as_str).map(|s| s.to_string()))
                 .unwrap_or_else(|| "exec".to_string());
             let _ = outbound.send(AgentEvent::ToolUse(label)).await;
         }
@@ -340,7 +335,9 @@ async fn handle_stdout_line(
             let _ = outbound.send(AgentEvent::ToolUse(label)).await;
         }
         "patch_apply_begin" => {
-            let _ = outbound.send(AgentEvent::ToolUse("patch".to_string())).await;
+            let _ = outbound
+                .send(AgentEvent::ToolUse("patch".to_string()))
+                .await;
         }
         "token_count" => {
             // Sum the cumulative `total_token_usage` and overwrite the running

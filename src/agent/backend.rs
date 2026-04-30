@@ -110,14 +110,8 @@ mod tests {
             "Claude_Code".parse::<BackendKind>().unwrap(),
             BackendKind::ClaudeCode
         );
-        assert_eq!(
-            "CODEX".parse::<BackendKind>().unwrap(),
-            BackendKind::Codex
-        );
-        assert_eq!(
-            "Aider".parse::<BackendKind>().unwrap(),
-            BackendKind::Aider
-        );
+        assert_eq!("CODEX".parse::<BackendKind>().unwrap(), BackendKind::Codex);
+        assert_eq!("Aider".parse::<BackendKind>().unwrap(), BackendKind::Aider);
         assert_eq!(
             "GEMINI".parse::<BackendKind>().unwrap(),
             BackendKind::Gemini

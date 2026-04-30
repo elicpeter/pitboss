@@ -7,7 +7,7 @@
 
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-007EC6)](#license)
-[![Agent](https://img.shields.io/badge/agent-Claude%20Code-D97757)](https://docs.anthropic.com)
+[![Agents](https://img.shields.io/badge/agents-Claude%20%C2%B7%20Codex%20%C2%B7%20Aider%20%C2%B7%20Gemini-7C3AED)](#agent-backends)
 [![CI](https://github.com/elicpeter/pitboss/actions/workflows/ci.yml/badge.svg)](https://github.com/elicpeter/pitboss/actions/workflows/ci.yml)
 
 </div>
