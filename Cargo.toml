@@ -2,8 +2,22 @@
 name = "foreman"
 version = "0.1.0"
 edition = "2021"
-description = "Orchestrates coding agents through a phased implementation plan"
+description = "CLI that orchestrates coding agents (Claude Code and others) through a phased implementation plan, with automatic test/commit loops and a TUI dashboard"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/elicpeter/foreman"
+homepage = "https://github.com/elicpeter/foreman"
+documentation = "https://docs.rs/foreman"
+readme = "README.md"
+keywords = ["ai", "agent", "cli", "automation", "claude"]
+categories = ["command-line-utilities", "development-tools"]
+authors = ["elipeter <elicpeter@gmail.com>"]
+rust-version = "1.80"
+include = [
+    "src/**/*",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
 
 [[bin]]
 name = "foreman"
