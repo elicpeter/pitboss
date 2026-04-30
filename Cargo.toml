@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["ai", "agent", "cli", "automation", "claude"]
 categories = ["command-line-utilities", "development-tools"]
 authors = ["elipeter <elicpeter@gmail.com>"]
-rust-version = "1.85"
+rust-version = "1.88"
 include = [
     "src/**/*",
     "README.md",

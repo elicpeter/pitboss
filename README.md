@@ -8,7 +8,7 @@
 [![Rust](https://img.shields.io/badge/rust-stable-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-007EC6)](#license)
 [![Agent](https://img.shields.io/badge/agent-Claude%20Code-D97757)](https://docs.anthropic.com)
-[![Status](https://img.shields.io/badge/status-alpha-yellow)]()
+[![CI](https://github.com/elicpeter/foreman/actions/workflows/ci.yml/badge.svg)](https://github.com/elicpeter/foreman/actions/workflows/ci.yml)
 
 </div>
 

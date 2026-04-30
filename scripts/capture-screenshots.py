@@ -133,8 +133,8 @@ publish = false
 
 [dependencies]
 foreman = {{ path = "{ROOT}" }}
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 """
 
 DEMO_MAIN_RS = r"""
