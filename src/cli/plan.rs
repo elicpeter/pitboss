@@ -15,7 +15,7 @@
 //!
 //! User-authored `plan.md` content is never overwritten silently — `--force`
 //! is required to clobber an existing file. The one exception is the seed
-//! `pitboss init` writes (see [`crate::cli::init::PLAN_TEMPLATE`]): when the
+//! `pitboss init` writes (see `crate::cli::init::PLAN_TEMPLATE`): when the
 //! existing `plan.md` is byte-identical to that seed, the planner overwrites
 //! it without `--force`, since the user demonstrably hasn't touched it. Any
 //! deviation from the seed (even a single edited word) reverts to the
@@ -29,9 +29,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::claude_code::ClaudeCodeAgent;
-use crate::agent::{Agent, AgentEvent, AgentRequest, Role, StopReason};
-use crate::config;
+use crate::agent::{self, Agent, AgentEvent, AgentRequest, Role, StopReason};
+use crate::config::{self, Config};
 use crate::plan;
 use crate::prompts;
 use crate::style::{self, col};
@@ -59,11 +58,48 @@ pub struct PlanRunOutcome {
     pub attempts: u32,
 }
 
-/// Top-level entry point for the `plan` subcommand. Builds a real
-/// [`ClaudeCodeAgent`] and dispatches via [`run_with_agent`].
-pub async fn run(workspace: PathBuf, goal: String, force: bool) -> Result<()> {
-    let agent = ClaudeCodeAgent::new();
-    let outcome = run_with_agent(&workspace, &goal, force, &agent).await?;
+/// Top-level entry point for the `plan` subcommand. Builds the configured
+/// backend via [`agent::build_agent`] and dispatches through
+/// [`run_with_agent`].
+///
+/// When `interview` is `true`, the agent is first asked to generate targeted
+/// design questions; the user answers them interactively. The Q&A spec is
+/// appended to `goal` before the planner is dispatched, giving the model a
+/// richer context for generating a precise `plan.md`.
+pub async fn run(workspace: PathBuf, goal: String, force: bool, interview: bool) -> Result<()> {
+    let cfg = config::load(&workspace)
+        .with_context(|| format!("plan: loading config in {}", workspace.display()))?;
+    let agent = agent::build_agent(&cfg)?;
+    let repo_summary = collect_repo_summary(&workspace)?;
+
+    let effective_goal = if interview {
+        let spec = crate::cli::interview::conduct(
+            &workspace,
+            &goal,
+            &repo_summary,
+            &cfg,
+            &agent,
+            crate::cli::interview::DEFAULT_MAX_QUESTIONS,
+        )
+        .await?;
+        if spec.is_empty() {
+            goal
+        } else {
+            format!("{goal}\n\n## Design Specification\n\n{spec}")
+        }
+    } else {
+        goal
+    };
+
+    let outcome = run_with_agent(
+        &workspace,
+        &effective_goal,
+        force,
+        &cfg,
+        &repo_summary,
+        &agent,
+    )
+    .await?;
     let c = style::use_color_stdout();
     println!(
         "{} {} ({} attempt{})",
@@ -77,11 +113,18 @@ pub async fn run(workspace: PathBuf, goal: String, force: bool) -> Result<()> {
 
 /// Test-friendly entry point that accepts any [`Agent`]. Tests pass a
 /// `DryRunAgent` whose stdout script holds canned plan.md bodies; production
-/// passes a `ClaudeCodeAgent`.
+/// passes whatever backend [`agent::build_agent`] selected from
+/// `pitboss.toml`.
+///
+/// `cfg` and `repo_summary` are threaded in by the caller so the workspace is
+/// not loaded or walked twice on the interview path. Callers that don't have
+/// them handy can use `config::load` and `collect_repo_summary` directly.
 pub async fn run_with_agent<A: Agent>(
     workspace: &Path,
     goal: &str,
     force: bool,
+    cfg: &Config,
+    repo_summary: &str,
     agent: &A,
 ) -> Result<PlanRunOutcome> {
     let plan_path = workspace.join("plan.md");
@@ -92,12 +135,8 @@ pub async fn run_with_agent<A: Agent>(
         );
     }
 
-    let cfg = config::load(workspace)
-        .with_context(|| format!("plan: loading config in {}", workspace.display()))?;
     ensure_logs_dir(workspace)?;
-
-    let repo_summary = collect_repo_summary(workspace)?;
-    let base_prompt = prompts::planner(goal, &repo_summary);
+    let base_prompt = prompts::planner(goal, repo_summary);
 
     let c = style::use_color_stderr();
     let fm = col(c, style::BOLD_CYAN, "[pitboss]");
@@ -123,7 +162,7 @@ pub async fn run_with_agent<A: Agent>(
         let request = AgentRequest {
             role: Role::Planner,
             model: cfg.models.planner.clone(),
-            system_prompt: String::new(),
+            system_prompt: prompts::caveman::system_prompt(&cfg.caveman),
             user_prompt,
             workdir: workspace.to_path_buf(),
             log_path,
@@ -490,12 +529,21 @@ current_phase: \"01\"
             })
     }
 
+    /// Loads the config and repo summary for `workspace` the same way `run`
+    /// does, so each test exercises the real production wiring.
+    fn plan_inputs(workspace: &Path) -> (Config, String) {
+        let cfg = config::load(workspace).unwrap();
+        let summary = collect_repo_summary(workspace).unwrap();
+        (cfg, summary)
+    }
+
     #[tokio::test]
     async fn happy_path_writes_plan_md_on_first_attempt() {
         let dir = tempdir().unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
+        let (cfg, summary) = plan_inputs(dir.path());
 
-        let outcome = run_with_agent(dir.path(), "build a thing", false, &agent)
+        let outcome = run_with_agent(dir.path(), "build a thing", false, &cfg, &summary, &agent)
             .await
             .unwrap();
 
@@ -512,7 +560,8 @@ current_phase: \"01\"
         fs::write(dir.path().join("plan.md"), preexisting).unwrap();
 
         let agent = dry_agent_emitting(CANNED_PLAN);
-        let err = run_with_agent(dir.path(), "build", false, &agent)
+        let (cfg, summary) = plan_inputs(dir.path());
+        let err = run_with_agent(dir.path(), "build", false, &cfg, &summary, &agent)
             .await
             .unwrap_err();
 
@@ -536,8 +585,9 @@ current_phase: \"01\"
         )
         .unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
+        let (cfg, summary) = plan_inputs(dir.path());
 
-        let outcome = run_with_agent(dir.path(), "build", false, &agent)
+        let outcome = run_with_agent(dir.path(), "build", false, &cfg, &summary, &agent)
             .await
             .unwrap();
 
@@ -556,8 +606,9 @@ current_phase: \"01\"
         edited.push_str("\nuser added a note here\n");
         fs::write(dir.path().join("plan.md"), edited.as_bytes()).unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
+        let (cfg, summary) = plan_inputs(dir.path());
 
-        let err = run_with_agent(dir.path(), "build", false, &agent)
+        let err = run_with_agent(dir.path(), "build", false, &cfg, &summary, &agent)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("--force"), "err: {err}");
@@ -570,8 +621,9 @@ current_phase: \"01\"
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("plan.md"), b"old content\n").unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
+        let (cfg, summary) = plan_inputs(dir.path());
 
-        let outcome = run_with_agent(dir.path(), "build", true, &agent)
+        let outcome = run_with_agent(dir.path(), "build", true, &cfg, &summary, &agent)
             .await
             .unwrap();
 
@@ -589,7 +641,8 @@ current_phase: \"01\"
             "garbage without frontmatter\n".to_string(),
             CANNED_PLAN.to_string(),
         ]);
-        let outcome = run_with_agent(dir.path(), "g", false, &agent)
+        let (cfg, summary) = plan_inputs(dir.path());
+        let outcome = run_with_agent(dir.path(), "g", false, &cfg, &summary, &agent)
             .await
             .unwrap();
         assert_eq!(outcome.attempts, 2);
@@ -604,7 +657,8 @@ current_phase: \"01\"
             "still not a plan\n".to_string(),
             "still garbage\n".to_string(),
         ]);
-        let err = run_with_agent(dir.path(), "g", false, &agent)
+        let (cfg, summary) = plan_inputs(dir.path());
+        let err = run_with_agent(dir.path(), "g", false, &cfg, &summary, &agent)
             .await
             .unwrap_err();
         let msg = format!("{err:#}");
@@ -624,7 +678,8 @@ current_phase: \"01\"
         // retry and plan.md must not be written.
         let dir = tempdir().unwrap();
         let agent = DryRunAgent::new("planner-fail").finish(DryRunFinal::Error("boom".into()));
-        let err = run_with_agent(dir.path(), "g", false, &agent)
+        let (cfg, summary) = plan_inputs(dir.path());
+        let err = run_with_agent(dir.path(), "g", false, &cfg, &summary, &agent)
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("boom"));
@@ -637,7 +692,8 @@ current_phase: \"01\"
         // dir exists even if the agent didn't write the log itself (DryRun).
         let dir = tempdir().unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
-        let _ = run_with_agent(dir.path(), "g", false, &agent)
+        let (cfg, summary) = plan_inputs(dir.path());
+        let _ = run_with_agent(dir.path(), "g", false, &cfg, &summary, &agent)
             .await
             .unwrap();
         assert!(dir.path().join(".pitboss/logs").is_dir());

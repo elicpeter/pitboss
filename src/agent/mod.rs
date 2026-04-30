@@ -19,8 +19,12 @@
 //! Implementations **must** honor both the supplied `cancel`
 //! [`tokio_util::sync::CancellationToken`] and `req.timeout`.
 
+pub mod aider;
+pub mod backend;
 pub mod claude_code;
+pub mod codex;
 pub mod dry_run;
+pub mod gemini;
 pub mod subprocess;
 
 use std::path::PathBuf;
@@ -34,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::state::TokenUsage;
 
-pub use subprocess::{run_logged, SubprocessOutcome};
+pub use subprocess::{run_logged, run_logged_with_stdin, SubprocessOutcome};
 
 /// Which agent role is being dispatched.
 ///
@@ -166,6 +170,102 @@ pub trait Agent: Send + Sync {
     ) -> Result<AgentOutcome>;
 }
 
+/// Blanket impl so `Box<dyn Agent + Send + Sync>` satisfies the `Agent`
+/// bound the runner and CLI helpers carry. Enables [`build_agent`] to return
+/// a heap-allocated trait object that flows through generic call sites
+/// (`Runner::new<A: Agent + 'static>`, `run_with_agent<A: Agent>`) without
+/// every caller having to depend on the concrete backend type.
+#[async_trait]
+impl<A: Agent + ?Sized> Agent for Box<A> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    async fn run(
+        &self,
+        req: AgentRequest,
+        events: mpsc::Sender<AgentEvent>,
+        cancel: CancellationToken,
+    ) -> Result<AgentOutcome> {
+        (**self).run(req, events, cancel).await
+    }
+}
+
+/// Construct the agent the runner should dispatch through, based on
+/// `pitboss.toml`'s `[agent] backend` selector.
+///
+/// A missing or absent `backend` falls back to [`backend::BackendKind::default`]
+/// (Claude Code) so workspaces without an `[agent]` section keep today's
+/// behavior. Unknown backend strings surface a parse error from
+/// [`backend::BackendKind`]'s [`std::str::FromStr`] impl. Each known backend
+/// (`claude_code`, `codex`, `aider`, `gemini`) builds its own adapter, with
+/// the matching `[agent.<backend>]` sub-table feeding binary path, extra
+/// arguments, and model overrides into the constructor.
+pub fn build_agent(cfg: &crate::config::Config) -> Result<Box<dyn Agent + Send + Sync>> {
+    let kind = match cfg.agent.backend.as_deref() {
+        None => backend::BackendKind::default(),
+        Some(s) => s.parse::<backend::BackendKind>()?,
+    };
+    match kind {
+        backend::BackendKind::ClaudeCode => {
+            let overrides = &cfg.agent.claude_code;
+            let mut agent = match overrides.binary.as_ref() {
+                Some(path) => claude_code::ClaudeCodeAgent::with_binary(path),
+                None => claude_code::ClaudeCodeAgent::new(),
+            };
+            if !overrides.extra_args.is_empty() {
+                agent = agent.with_extra_args(overrides.extra_args.clone());
+            }
+            if let Some(model) = overrides.model.as_deref() {
+                agent = agent.with_model_override(model);
+            }
+            Ok(Box::new(agent))
+        }
+        backend::BackendKind::Codex => {
+            let overrides = &cfg.agent.codex;
+            let mut agent = match overrides.binary.as_ref() {
+                Some(path) => codex::CodexAgent::with_binary(path),
+                None => codex::CodexAgent::new(),
+            };
+            if !overrides.extra_args.is_empty() {
+                agent = agent.with_extra_args(overrides.extra_args.clone());
+            }
+            if let Some(model) = overrides.model.as_deref() {
+                agent = agent.with_model_override(model);
+            }
+            Ok(Box::new(agent))
+        }
+        backend::BackendKind::Aider => {
+            let overrides = &cfg.agent.aider;
+            let mut agent = match overrides.binary.as_ref() {
+                Some(path) => aider::AiderAgent::with_binary(path),
+                None => aider::AiderAgent::new(),
+            };
+            if !overrides.extra_args.is_empty() {
+                agent = agent.with_extra_args(overrides.extra_args.clone());
+            }
+            if let Some(model) = overrides.model.as_deref() {
+                agent = agent.with_model_override(model);
+            }
+            Ok(Box::new(agent))
+        }
+        backend::BackendKind::Gemini => {
+            let overrides = &cfg.agent.gemini;
+            let mut agent = match overrides.binary.as_ref() {
+                Some(path) => gemini::GeminiAgent::with_binary(path),
+                None => gemini::GeminiAgent::new(),
+            };
+            if !overrides.extra_args.is_empty() {
+                agent = agent.with_extra_args(overrides.extra_args.clone());
+            }
+            if let Some(model) = overrides.model.as_deref() {
+                agent = agent.with_model_override(model);
+            }
+            Ok(Box::new(agent))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +292,163 @@ mod tests {
         assert_ne!(StopReason::Completed, StopReason::Timeout);
         assert_eq!(StopReason::Error("x".into()), StopReason::Error("x".into()));
         assert_ne!(StopReason::Error("x".into()), StopReason::Error("y".into()));
+    }
+
+    #[test]
+    fn build_agent_defaults_to_claude_code_when_unspecified() {
+        let cfg = crate::config::Config::default();
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "claude-code"),
+            Err(e) => panic!("default config must build the claude_code agent: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_dispatches_explicit_claude_code() {
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("claude_code".to_string());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "claude-code"),
+            Err(e) => panic!("explicit claude_code must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_has_no_pending_backends() {
+        // Every named backend in [`backend::BackendKind`] must construct an
+        // adapter — pitboss shipped its full backend trio in phases 02–04
+        // (codex, aider, gemini) on top of the default claude_code. If a new
+        // backend is added to the enum without a matching factory arm this
+        // test fails and forces the wiring to land in the same change.
+        for name in ["claude_code", "codex", "aider", "gemini"] {
+            let mut cfg = crate::config::Config::default();
+            cfg.agent.backend = Some(name.to_string());
+            assert!(
+                build_agent(&cfg).is_ok(),
+                "backend {name} must build a concrete agent"
+            );
+        }
+    }
+
+    #[test]
+    fn build_agent_dispatches_explicit_codex() {
+        // Phase 02 acceptance: setting `[agent] backend = "codex"` must build
+        // the CodexAgent adapter rather than the default Claude Code one.
+        // `Box<dyn Agent>` hides the concrete type, so we verify via
+        // `Agent::name`, which is the same surface the runner logs use.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("codex".to_string());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "codex"),
+            Err(e) => panic!("explicit codex must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_dispatches_explicit_aider() {
+        // Phase 03 acceptance: setting `[agent] backend = "aider"` must build
+        // the AiderAgent adapter rather than the default Claude Code one or
+        // erroring out as a not-yet-implemented backend.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("aider".to_string());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "aider"),
+            Err(e) => panic!("explicit aider must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_dispatches_explicit_gemini() {
+        // Phase 04 acceptance: setting `[agent] backend = "gemini"` must build
+        // the GeminiAgent adapter rather than the default Claude Code one or
+        // erroring out as a not-yet-implemented backend.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("gemini".to_string());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "gemini"),
+            Err(e) => panic!("explicit gemini must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_gemini_honors_overrides() {
+        // The `[agent.gemini]` table must reach the constructed agent so tests
+        // (and real installs in non-standard locations) can point at a stub
+        // script and apply per-backend `extra_args` / `model`.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("gemini".to_string());
+        cfg.agent.gemini.binary = Some(std::path::PathBuf::from("/tmp/fake-gemini"));
+        cfg.agent.gemini.extra_args = vec!["--include-directories".into(), "src".into()];
+        cfg.agent.gemini.model = Some("gemini-2.5-flash".into());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "gemini"),
+            Err(e) => panic!("gemini with overrides must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_aider_honors_overrides() {
+        // The `[agent.aider]` table must reach the constructed agent so
+        // tests (and real installs in non-standard locations) can point at a
+        // stub script and apply per-backend `extra_args` / `model`.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("aider".to_string());
+        cfg.agent.aider.binary = Some(std::path::PathBuf::from("/tmp/fake-aider"));
+        cfg.agent.aider.extra_args = vec!["--no-auto-commits".into()];
+        cfg.agent.aider.model = Some("anthropic/sonnet-4.5".into());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "aider"),
+            Err(e) => panic!("aider with overrides must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_claude_code_honors_overrides() {
+        // The `[agent.claude_code]` table must reach the constructed agent
+        // so a workspace-pinned binary, model, or extra args actually changes
+        // dispatch behavior. Without this wiring the TUI header would show an
+        // override model the backend never uses.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("claude_code".to_string());
+        cfg.agent.claude_code.binary = Some(std::path::PathBuf::from("/tmp/fake-claude"));
+        cfg.agent.claude_code.extra_args = vec!["--max-turns".into(), "50".into()];
+        cfg.agent.claude_code.model = Some("claude-opus-4-7".into());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "claude-code"),
+            Err(e) => panic!("claude_code with overrides must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_codex_honors_binary_override() {
+        // The `[agent.codex] binary = "..."` override must reach the
+        // constructed agent so tests (and real installs in non-standard
+        // locations) can point at a stub script. The dispatch path doesn't
+        // spawn the binary, so an obviously-fake path is fine here.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("codex".to_string());
+        cfg.agent.codex.binary = Some(std::path::PathBuf::from("/tmp/fake-codex"));
+        cfg.agent.codex.extra_args = vec!["--quiet".into()];
+        cfg.agent.codex.model = Some("gpt-5-codex".into());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "codex"),
+            Err(e) => panic!("codex with overrides must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_rejects_unknown_backend() {
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("ollama".into());
+        match build_agent(&cfg) {
+            Ok(_) => panic!("unknown backend must not build"),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                assert!(
+                    msg.contains("ollama"),
+                    "expected unknown-backend error to echo the input, got: {msg}"
+                );
+            }
+        }
     }
 }

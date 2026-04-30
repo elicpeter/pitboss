@@ -46,11 +46,31 @@ pub struct SubprocessOutcome {
 /// always returns `Ok(_)`, with `stop_reason` distinguishing natural exit
 /// from cancel/timeout.
 pub async fn run_logged(
+    cmd: Command,
+    log_path: impl AsRef<Path>,
+    events: mpsc::Sender<AgentEvent>,
+    cancel: CancellationToken,
+    timeout: Duration,
+) -> Result<SubprocessOutcome> {
+    run_logged_with_stdin(cmd, log_path, events, cancel, timeout, None).await
+}
+
+/// Variant of [`run_logged`] that writes `stdin_payload` to the child's stdin
+/// before draining its output. Used by backends (e.g. `codex`) whose contract
+/// expects the prompt body on stdin rather than as positional argv.
+///
+/// `stdin_payload = None` is exactly equivalent to [`run_logged`] (`Stdio::null`
+/// stdin). When `Some(bytes)`, stdin is piped and the payload is written in a
+/// background task that runs concurrently with stdout/stderr drainage, so a
+/// child that interleaves reads and writes can't deadlock against a full pipe
+/// buffer. The writer closes stdin once the payload is delivered.
+pub async fn run_logged_with_stdin(
     mut cmd: Command,
     log_path: impl AsRef<Path>,
     events: mpsc::Sender<AgentEvent>,
     cancel: CancellationToken,
     timeout: Duration,
+    stdin_payload: Option<Vec<u8>>,
 ) -> Result<SubprocessOutcome> {
     let log_path = log_path.as_ref();
     if let Some(parent) = log_path.parent() {
@@ -68,15 +88,25 @@ pub async fn run_logged(
         .with_context(|| format!("subprocess: open log {:?}", log_path))?;
     let log = Arc::new(Mutex::new(log_file));
 
-    cmd.stdin(Stdio::null())
+    let stdin_setting = if stdin_payload.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    cmd.stdin(stdin_setting)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
     let mut child = cmd.spawn().context("subprocess: spawning child process")?;
+    let stdin_handle = child.stdin.take();
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
 
+    // Spawn output drainers before writing stdin. A large stdin payload can
+    // fill the kernel pipe buffer; if the child writes to stdout/stderr while
+    // we're still blocked on write_all, both sides deadlock unless we drain
+    // output concurrently.
     let stdout_task = tokio::spawn(forward_stream(
         stdout,
         StreamKind::Stdout,
@@ -89,6 +119,20 @@ pub async fn run_logged(
         log.clone(),
         events.clone(),
     ));
+
+    let stdin_task = stdin_payload.and_then(|bytes| {
+        stdin_handle.map(|mut stdin| {
+            tokio::spawn(async move {
+                // Best-effort write + close. If the child exits before draining
+                // stdin (EPIPE) we must still produce a normal SubprocessOutcome
+                // so callers see the real exit code and captured stderr — those
+                // are the signal that explains *why* the child rejected input.
+                // Surfacing the write error here would shadow that diagnosis.
+                let _ = stdin.write_all(&bytes).await;
+                let _ = stdin.shutdown().await;
+            })
+        })
+    });
 
     let outcome = tokio::select! {
         biased;
@@ -113,6 +157,11 @@ pub async fn run_logged(
     // the log so `log_path` reflects everything the process emitted.
     let _ = stdout_task.await;
     let _ = stderr_task.await;
+    if let Some(task) = stdin_task {
+        // Once the child has exited, the writer either finished or hit EPIPE.
+        // Either way the task is about to complete, so just await it.
+        let _ = task.await;
+    }
     let mut f = log.lock().await;
     let _ = f.flush().await;
     drop(f);
@@ -274,6 +323,110 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.stop_reason, StopReason::Timeout);
         assert_eq!(outcome.exit_code, -1);
+    }
+
+    #[tokio::test]
+    async fn stdin_payload_is_delivered_to_child() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("cat");
+        let (tx, rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let outcome = run_logged_with_stdin(
+            cmd,
+            &log,
+            tx,
+            cancel,
+            Duration::from_secs(5),
+            Some(b"first line\nsecond line\n".to_vec()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.exit_code, 0);
+        let stdout: Vec<_> = drain(rx)
+            .await
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::Stdout(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stdout,
+            vec!["first line".to_string(), "second line".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn large_stdin_with_large_stdout_does_not_deadlock() {
+        // Regression: writing stdin synchronously before spawning the
+        // stdout/stderr drainers deadlocks when the payload exceeds the
+        // pipe buffer and the child also produces enough output to fill its
+        // own stdout pipe. `cat` of a >1 MiB payload exercises both ends —
+        // pipe buffers on Linux/macOS are typically 64 KiB.
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("cat");
+        let (tx, mut rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let expected_lines = 16_384usize;
+        let payload: Vec<u8> = (0..expected_lines)
+            .flat_map(|i| format!("line {i}\n").into_bytes())
+            .collect();
+        // Drain events concurrently so the bounded channel doesn't itself
+        // become a back-pressure source that masks what the test is checking.
+        let collector = tokio::spawn(async move {
+            let mut out = Vec::new();
+            while let Some(e) = rx.recv().await {
+                if let AgentEvent::Stdout(s) = e {
+                    out.push(s);
+                }
+            }
+            out
+        });
+        let outcome = run_logged_with_stdin(
+            cmd,
+            &log,
+            tx,
+            cancel,
+            Duration::from_secs(20),
+            Some(payload),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.exit_code, 0);
+        let stdout = collector.await.unwrap();
+        assert_eq!(stdout.len(), expected_lines);
+        assert_eq!(stdout[0], "line 0");
+        assert_eq!(
+            stdout[expected_lines - 1],
+            format!("line {}", expected_lines - 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn child_exiting_before_draining_stdin_is_non_fatal() {
+        // Child exits immediately without reading stdin. With a payload
+        // larger than the pipe buffer, the parent's write_all will hit
+        // EPIPE — the helper must still report the natural exit code
+        // rather than masking it with a setup-style error.
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("exit 3");
+        let (tx, _rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let payload = vec![b'x'; 1024 * 1024];
+        let outcome =
+            run_logged_with_stdin(cmd, &log, tx, cancel, Duration::from_secs(5), Some(payload))
+                .await
+                .unwrap();
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.exit_code, 3);
     }
 
     #[tokio::test]

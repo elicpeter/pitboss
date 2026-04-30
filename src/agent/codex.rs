@@ -1,35 +1,50 @@
-//! `ClaudeCodeAgent` — production [`Agent`] that drives Anthropic's `claude`
-//! CLI in non-interactive (`-p` / `--print`) mode and parses its streaming
-//! JSON event protocol.
+//! `CodexAgent` — production [`Agent`] that drives OpenAI's `codex` CLI in
+//! non-interactive (`exec`) mode and parses its newline-delimited JSON event
+//! stream.
 //!
-//! ## How to install / configure `claude`
+//! ## How to install / configure `codex`
 //!
-//! Pitboss shells out to whatever `claude` binary is on `PATH` (or the path
-//! you pass to [`ClaudeCodeAgent::with_binary`]). Install per Anthropic's
-//! Claude Code docs and authenticate (`claude auth login`) before running
-//! pitboss. To verify the install, run `claude -p "hello" --output-format
-//! stream-json --verbose --model haiku` from a shell — pitboss invokes the
-//! binary with the same flag set.
+//! Pitboss shells out to whatever `codex` binary is on `PATH` (or the path you
+//! pass via `[agent.codex] binary` in `pitboss.toml`). Install per OpenAI's
+//! Codex CLI docs and authenticate (`codex login`) before running pitboss. To
+//! verify the install, `codex exec --json --model o4-mini --skip-git-repo-check -`
+//! reading `hello` from stdin works from a shell — pitboss invokes the binary
+//! with the same flag shape.
 //!
-//! Pitboss runs the agent under `--permission-mode auto` for safe unattended
-//! orchestration. If you want a different mode, construct the agent with
-//! [`ClaudeCodeAgent::with_permission_mode`].
+//! Pitboss runs the agent under `--ask-for-approval never` and
+//! `--skip-git-repo-check` so it never blocks on an interactive prompt and so
+//! it works inside scratch worktrees that aren't full git repos. Override via
+//! `[agent.codex] extra_args = […]` if you need different policy flags.
+//!
+//! ## Prompt assembly
+//!
+//! Codex has no separate system-prompt channel, so [`AgentRequest::system_prompt`]
+//! and [`AgentRequest::user_prompt`] are concatenated — system first, blank line,
+//! then user — and the whole payload is written to the child's stdin. The CLI
+//! is invoked with the trailing `-` sigil to read its prompt from stdin.
 //!
 //! ## Event mapping
 //!
-//! `claude --output-format stream-json` emits one JSON object per line. We
-//! map the subset we care about to [`AgentEvent`]:
+//! `codex exec --json` emits one JSON object per line. Each object has an `id`
+//! and a `msg` field; we dispatch on `msg.type`:
 //!
-//! - `assistant` messages — for each block in `message.content`:
-//!   - `text` → [`AgentEvent::Stdout`] carrying the text body.
-//!   - `tool_use` → [`AgentEvent::ToolUse`] carrying the tool name.
-//!   - `thinking` → dropped (noisy; still in the log file for post-mortem).
-//! - `result` (final event) — token totals are extracted into a single
-//!   [`AgentEvent::TokenDelta`] and folded into the returned [`AgentOutcome`].
-//!   `is_error: true` results map to [`StopReason::Error`].
-//! - Everything else (`system`, `user`, `rate_limit_event`, …) is ignored at
-//!   the event channel; the raw line still hits `log_path` via
-//!   [`subprocess::run_logged`].
+//! - `agent_message` (`message`: string) → [`AgentEvent::Stdout`].
+//! - `exec_command_begin` (`command`: array of strings) → [`AgentEvent::ToolUse`]
+//!   carrying the first argv element.
+//! - `mcp_tool_call_begin` (`server`, `tool`) → [`AgentEvent::ToolUse`] carrying
+//!   `<server>.<tool>` so MCP-driven runs surface alongside shell tool calls.
+//! - `patch_apply_begin` → [`AgentEvent::ToolUse`]`("patch")` so file edits show
+//!   in the dashboard the same way Claude's `Edit` tool does.
+//! - `token_count` (`info.total_token_usage` with `input_tokens`,
+//!   `cached_input_tokens`, `output_tokens`) → folded into a running
+//!   [`TokenUsage`]; one [`AgentEvent::TokenDelta`] is emitted at the end so
+//!   the runner doesn't double-count interim updates.
+//! - `task_complete` — terminal success marker; the next event will be EOF.
+//! - `error` (`message`: string) — terminal failure marker; produces
+//!   [`StopReason::Error`] with the supplied message.
+//! - `agent_reasoning`, `exec_command_end`, `task_started`, and other event
+//!   kinds are intentionally dropped at the channel; they remain in the log
+//!   file via [`subprocess::run_logged_with_stdin`].
 //!
 //! Lines that fail to parse as JSON are forwarded as
 //! [`AgentEvent::Stdout`] verbatim so unexpected output stays visible.
@@ -51,28 +66,26 @@ use super::{
 };
 
 /// Default binary name. Resolved against `PATH` by the OS.
-const DEFAULT_BINARY: &str = "claude";
+const DEFAULT_BINARY: &str = "codex";
 
 /// How many trailing stderr lines to attach to a [`StopReason::Error`] when
 /// the process exits non-zero. Bounded so a chatty error doesn't flood the
 /// runner log.
 const ERROR_TAIL_LINES: usize = 8;
 
-/// Production [`Agent`] that drives the `claude` CLI.
+/// Production [`Agent`] that drives the `codex` CLI.
 #[derive(Debug, Clone)]
-pub struct ClaudeCodeAgent {
+pub struct CodexAgent {
     binary: PathBuf,
-    permission_mode: String,
     extra_args: Vec<String>,
     model_override: Option<String>,
 }
 
-impl ClaudeCodeAgent {
-    /// Construct an agent that resolves `claude` from `PATH`.
+impl CodexAgent {
+    /// Construct an agent that resolves `codex` from `PATH`.
     pub fn new() -> Self {
         Self {
             binary: PathBuf::from(DEFAULT_BINARY),
-            permission_mode: "auto".to_string(),
             extra_args: Vec::new(),
             model_override: None,
         }
@@ -84,32 +97,23 @@ impl ClaudeCodeAgent {
     pub fn with_binary(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: binary.into(),
-            permission_mode: "auto".to_string(),
             extra_args: Vec::new(),
             model_override: None,
         }
     }
 
-    /// Override the `--permission-mode` flag passed to `claude`. The default
-    /// is `auto`; other valid values are `acceptEdits`, `bypassPermissions`,
-    /// `default`, `dontAsk`, `plan`.
-    pub fn with_permission_mode(mut self, mode: impl Into<String>) -> Self {
-        self.permission_mode = mode.into();
-        self
-    }
-
-    /// Append extra argv that gets spliced in just before the positional `--`
-    /// prompt sigil on every invocation. Mirrors `[agent.claude_code]
-    /// extra_args` in `pitboss.toml`.
+    /// Append extra argv that gets spliced in just before the `-` stdin sigil
+    /// on every invocation. Mirrors `[agent.codex] extra_args` in
+    /// `pitboss.toml`.
     pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
         self.extra_args = args;
         self
     }
 
-    /// Override the model identifier with a value from `[agent.claude_code]
-    /// model`. When set this beats the per-role model in
-    /// [`AgentRequest::model`] — users who configure a backend-specific model
-    /// expect it to be used for every dispatch through that backend.
+    /// Override the model identifier with a value from `[agent.codex] model`.
+    /// When set this beats the per-role model in [`AgentRequest::model`] —
+    /// users who configure a backend-specific model expect it to be used for
+    /// every dispatch through that backend.
     pub fn with_model_override(mut self, model: impl Into<String>) -> Self {
         self.model_override = Some(model.into());
         self
@@ -121,16 +125,16 @@ impl ClaudeCodeAgent {
     }
 }
 
-impl Default for ClaudeCodeAgent {
+impl Default for CodexAgent {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl Agent for ClaudeCodeAgent {
+impl Agent for CodexAgent {
     fn name(&self) -> &str {
-        "claude-code"
+        "codex"
     }
 
     async fn run(
@@ -140,12 +144,13 @@ impl Agent for ClaudeCodeAgent {
         cancel: CancellationToken,
     ) -> Result<AgentOutcome> {
         let log_path = req.log_path.clone();
+        let stdin_payload = build_stdin_payload(&req);
         let cmd = self.build_command(&req);
 
         // Raw subprocess events flow through `raw_*` then a forwarder turns
-        // each stdout line into the appropriate semantic AgentEvent. Stderr
-        // is forwarded verbatim and tee'd to a buffer so we can quote it back
-        // in the StopReason::Error message on a bad exit.
+        // each stdout line into the appropriate semantic AgentEvent. Stderr is
+        // forwarded verbatim and tee'd to a buffer so we can quote it back in
+        // the StopReason::Error message on a bad exit.
         let (raw_tx, mut raw_rx) = mpsc::channel::<AgentEvent>(64);
         let outbound = events.clone();
         let forwarder = tokio::spawn(async move {
@@ -166,6 +171,12 @@ impl Agent for ClaudeCodeAgent {
                     }
                 }
             }
+            // Emit one TokenDelta with the grand total at the end so the
+            // runner's accumulator doesn't double-count interim `token_count`
+            // events from the model.
+            if tokens.input > 0 || tokens.output > 0 {
+                let _ = outbound.send(AgentEvent::TokenDelta(tokens.clone())).await;
+            }
             ForwarderResult {
                 tokens,
                 error_message,
@@ -173,8 +184,15 @@ impl Agent for ClaudeCodeAgent {
             }
         });
 
-        let sub_outcome: SubprocessOutcome =
-            subprocess::run_logged(cmd, &log_path, raw_tx, cancel, req.timeout).await?;
+        let sub_outcome: SubprocessOutcome = subprocess::run_logged_with_stdin(
+            cmd,
+            &log_path,
+            raw_tx,
+            cancel,
+            req.timeout,
+            Some(stdin_payload),
+        )
+        .await?;
         let ForwarderResult {
             mut tokens,
             error_message,
@@ -185,7 +203,7 @@ impl Agent for ClaudeCodeAgent {
             stderr_tail: Vec::new(),
         });
         // by_role isn't populated by the model itself — re-key once here so
-        // the runner doesn't have to special-case Claude's outcome shape.
+        // the runner doesn't have to special-case Codex's outcome shape.
         if tokens.input > 0 || tokens.output > 0 {
             tokens
                 .by_role
@@ -226,25 +244,35 @@ impl Agent for ClaudeCodeAgent {
     }
 }
 
-impl ClaudeCodeAgent {
+impl CodexAgent {
     fn build_command(&self, req: &AgentRequest) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.current_dir(&req.workdir);
-        cmd.args(["--print", "--output-format", "stream-json", "--verbose"]);
+        cmd.arg("exec");
+        cmd.args(["--json", "--skip-git-repo-check"]);
+        cmd.args(["--ask-for-approval", "never"]);
         let model = self.model_override.as_deref().unwrap_or(&req.model);
         cmd.args(["--model", model]);
-        cmd.args(["--permission-mode", &self.permission_mode]);
-        if !req.system_prompt.is_empty() {
-            cmd.arg("--append-system-prompt").arg(&req.system_prompt);
-        }
         for arg in &self.extra_args {
             cmd.arg(arg);
         }
-        // Positional prompt argument comes last so flag parsing doesn't get
-        // confused if the prompt happens to start with `--`.
-        cmd.arg("--").arg(&req.user_prompt);
+        // Trailing `-` tells `codex exec` to read the prompt from stdin.
+        cmd.arg("-");
         cmd
     }
+}
+
+fn build_stdin_payload(req: &AgentRequest) -> Vec<u8> {
+    let mut out = String::new();
+    if !req.system_prompt.is_empty() {
+        out.push_str(&req.system_prompt);
+        out.push_str("\n\n");
+    }
+    out.push_str(&req.user_prompt);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.into_bytes()
 }
 
 struct ForwarderResult {
@@ -272,79 +300,76 @@ async fn handle_stdout_line(
         }
     };
 
-    let kind = parsed.get("type").and_then(Value::as_str).unwrap_or("");
+    let msg = match parsed.get("msg") {
+        Some(m) => m,
+        None => return,
+    };
+    let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
-        "assistant" => {
-            if let Some(content) = parsed
-                .get("message")
-                .and_then(|m| m.get("content"))
+        "agent_message" => {
+            if let Some(text) = msg.get("message").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    let _ = outbound.send(AgentEvent::Stdout(text.to_string())).await;
+                }
+            }
+        }
+        "exec_command_begin" => {
+            let label = msg
+                .get("command")
                 .and_then(Value::as_array)
+                .and_then(|argv| argv.first().and_then(Value::as_str).map(|s| s.to_string()))
+                .unwrap_or_else(|| "exec".to_string());
+            let _ = outbound.send(AgentEvent::ToolUse(label)).await;
+        }
+        "mcp_tool_call_begin" => {
+            let server = msg.get("server").and_then(Value::as_str).unwrap_or("");
+            let tool = msg.get("tool").and_then(Value::as_str).unwrap_or("");
+            let label = match (server.is_empty(), tool.is_empty()) {
+                (true, true) => "mcp".to_string(),
+                (true, false) => tool.to_string(),
+                (false, true) => server.to_string(),
+                (false, false) => format!("{server}.{tool}"),
+            };
+            let _ = outbound.send(AgentEvent::ToolUse(label)).await;
+        }
+        "patch_apply_begin" => {
+            let _ = outbound
+                .send(AgentEvent::ToolUse("patch".to_string()))
+                .await;
+        }
+        "token_count" => {
+            // Sum the cumulative `total_token_usage` and overwrite the running
+            // counter — codex emits a running total each turn, not a delta.
+            if let Some(usage) = msg
+                .get("info")
+                .and_then(|info| info.get("total_token_usage"))
             {
-                for block in content {
-                    let bk = block.get("type").and_then(Value::as_str).unwrap_or("");
-                    match bk {
-                        "text" => {
-                            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                if !text.is_empty() {
-                                    let _ =
-                                        outbound.send(AgentEvent::Stdout(text.to_string())).await;
-                                }
-                            }
-                        }
-                        "tool_use" => {
-                            if let Some(name) = block.get("name").and_then(Value::as_str) {
-                                let _ = outbound.send(AgentEvent::ToolUse(name.to_string())).await;
-                            }
-                        }
-                        // "thinking" and unknown blocks: log file already has
-                        // them, no point flooding the event channel.
-                        _ => {}
-                    }
-                }
+                tokens.input = sum_input_tokens(usage);
+                tokens.output = read_u64(usage, "output_tokens");
             }
         }
-        "result" => {
-            // Final event — pull totals out and emit one TokenDelta with the
-            // grand total. The runner aggregates by summing TokenDeltas, so
-            // we only emit once and never double-count.
-            if let Some(usage) = parsed.get("usage") {
-                let new_input = sum_input_tokens(usage);
-                let new_output = read_u64(usage, "output_tokens");
-                if new_input != tokens.input || new_output != tokens.output {
-                    tokens.input = new_input;
-                    tokens.output = new_output;
-                    let _ = outbound.send(AgentEvent::TokenDelta(tokens.clone())).await;
-                }
-            }
-            let is_error = parsed
-                .get("is_error")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if is_error {
-                let msg = parsed
-                    .get("result")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| {
-                        parsed
-                            .get("subtype")
-                            .and_then(Value::as_str)
-                            .unwrap_or("claude reported an error")
-                            .to_string()
-                    });
-                *error_message = Some(msg);
-            }
+        "error" => {
+            let msg_text = msg
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| "codex reported an error".to_string());
+            *error_message = Some(msg_text);
         }
-        // Other event kinds (system init, rate_limit_event, user tool
-        // results, etc.) are intentionally dropped at the event channel.
+        // `task_complete`, `task_started`, `agent_reasoning`,
+        // `exec_command_end`, `mcp_tool_call_end`, `patch_apply_end`, etc. are
+        // intentionally dropped at the channel — the log file already has them
+        // for post-mortem.
         _ => {}
     }
 }
 
 fn sum_input_tokens(usage: &Value) -> u64 {
-    read_u64(usage, "input_tokens")
-        + read_u64(usage, "cache_creation_input_tokens")
-        + read_u64(usage, "cache_read_input_tokens")
+    // Codex's `total_token_usage` separates `input_tokens` (uncached) from
+    // `cached_input_tokens` (cache hits). Both bill differently but for the
+    // dashboard's running total we sum them — same shape the Claude parser
+    // produces from `input_tokens + cache_creation + cache_read`.
+    read_u64(usage, "input_tokens") + read_u64(usage, "cached_input_tokens")
 }
 
 fn read_u64(v: &Value, key: &str) -> u64 {
@@ -360,8 +385,8 @@ fn push_tail(buf: &mut Vec<String>, line: String, max: usize) {
 
 fn format_error_message(exit_code: i32, parsed: Option<&str>, stderr_tail: &[String]) -> String {
     let mut out = match parsed {
-        Some(m) if !m.is_empty() => format!("claude: {} (exit {})", m, exit_code),
-        _ => format!("claude exited with code {}", exit_code),
+        Some(m) if !m.is_empty() => format!("codex: {} (exit {})", m, exit_code),
+        _ => format!("codex exited with code {}", exit_code),
     };
     if !stderr_tail.is_empty() {
         out.push_str("\nstderr tail:\n");
@@ -382,13 +407,17 @@ mod tests {
 
     fn fixture_path(name: &str) -> PathBuf {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest.join("tests").join("fixtures").join(name)
+        manifest
+            .join("tests")
+            .join("fixtures")
+            .join("codex")
+            .join(name)
     }
 
     fn req_with_log(log_path: PathBuf, timeout: Duration) -> AgentRequest {
         AgentRequest {
             role: Role::Implementer,
-            model: "claude-haiku-test".into(),
+            model: "o4-mini-test".into(),
             system_prompt: "be brief".into(),
             user_prompt: "say hi".into(),
             workdir: std::env::temp_dir(),
@@ -406,10 +435,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parses_assistant_text_and_tool_use_blocks() {
+    async fn parses_agent_message_and_tool_use_events() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
-        let agent = ClaudeCodeAgent::with_binary(fixture_path("fake-claude-success.sh"));
+        let agent = CodexAgent::with_binary(fixture_path("fake-codex-success.sh"));
         let (tx, rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let outcome = agent
@@ -447,39 +476,45 @@ mod tests {
             .collect();
 
         assert!(
-            stdouts.iter().any(|s| s.contains("Hello from Claude")),
+            stdouts.iter().any(|s| s.contains("Hello from Codex")),
             "missing assistant text: {stdouts:?}"
         );
-        assert_eq!(tool_uses, vec!["Bash", "Read"]);
+        assert_eq!(tool_uses, vec!["bash", "patch"]);
         assert_eq!(token_deltas.len(), 1);
         let total = token_deltas[0];
-        // From fixture: input_tokens=10, cache_creation=20, cache_read=5,
-        // output_tokens=51 — input total is 35.
-        assert_eq!(total.input, 35);
-        assert_eq!(total.output, 51);
+        // From fixture: input_tokens=12, cached_input_tokens=8, output_tokens=37
+        // → input total is 20.
+        assert_eq!(total.input, 20);
+        assert_eq!(total.output, 37);
 
         // by_role re-keyed onto Role::Implementer at the agent level.
-        assert_eq!(outcome.tokens.input, 35);
-        assert_eq!(outcome.tokens.output, 51);
+        assert_eq!(outcome.tokens.input, 20);
+        assert_eq!(outcome.tokens.output, 37);
         let role_usage = outcome
             .tokens
             .by_role
             .get("implementer")
             .expect("implementer role usage");
-        assert_eq!(role_usage.input, 35);
-        assert_eq!(role_usage.output, 51);
+        assert_eq!(role_usage.input, 20);
+        assert_eq!(role_usage.output, 37);
 
         // Log file should contain raw JSON for post-mortem.
         let log_text = std::fs::read_to_string(&log).unwrap();
-        assert!(log_text.contains("\"type\":\"assistant\""), "{log_text}");
-        assert!(log_text.contains("\"type\":\"result\""), "{log_text}");
+        assert!(
+            log_text.contains("\"type\":\"agent_message\""),
+            "{log_text}"
+        );
+        assert!(
+            log_text.contains("\"type\":\"task_complete\""),
+            "{log_text}"
+        );
     }
 
     #[tokio::test]
-    async fn maps_is_error_result_to_error_stop_reason() {
+    async fn maps_error_event_to_error_stop_reason() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
-        let agent = ClaudeCodeAgent::with_binary(fixture_path("fake-claude-error.sh"));
+        let agent = CodexAgent::with_binary(fixture_path("fake-codex-error.sh"));
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let outcome = agent
@@ -502,7 +537,7 @@ mod tests {
     async fn nonjson_stdout_is_forwarded_verbatim() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
-        let agent = ClaudeCodeAgent::with_binary(fixture_path("fake-claude-nonjson.sh"));
+        let agent = CodexAgent::with_binary(fixture_path("fake-codex-nonjson.sh"));
         let (tx, rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let outcome = agent
@@ -525,10 +560,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonzero_exit_without_result_event_maps_to_error() {
+    async fn nonzero_exit_without_error_event_maps_to_error() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
-        let agent = ClaudeCodeAgent::with_binary(fixture_path("fake-claude-crash.sh"));
+        let agent = CodexAgent::with_binary(fixture_path("fake-codex-crash.sh"));
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let outcome = agent
@@ -549,7 +584,7 @@ mod tests {
     async fn cancellation_propagates_to_child_process() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
-        let agent = ClaudeCodeAgent::with_binary(fixture_path("fake-claude-hang.sh"));
+        let agent = CodexAgent::with_binary(fixture_path("fake-codex-hang.sh"));
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let canceler = cancel.clone();
@@ -567,14 +602,14 @@ mod tests {
 
     #[tokio::test]
     async fn build_command_includes_required_flags_and_workdir() {
-        // No subprocess spawn here — we just inspect the constructed Command.
-        let agent = ClaudeCodeAgent::with_binary("/usr/local/bin/claude")
-            .with_permission_mode("acceptEdits");
+        let agent = CodexAgent::with_binary("/usr/local/bin/codex")
+            .with_extra_args(vec!["--quiet".into(), "--json-trace".into()])
+            .with_model_override("gpt-5-codex");
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
         let req = AgentRequest {
             role: Role::Auditor,
-            model: "claude-opus-4-7".into(),
+            model: "ignored-because-override".into(),
             system_prompt: "system body".into(),
             user_prompt: "user body".into(),
             workdir: dir.path().to_path_buf(),
@@ -587,82 +622,31 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.iter().any(|a| a == "--print"));
+        assert_eq!(args.first().map(String::as_str), Some("exec"));
+        assert!(args.iter().any(|a| a == "--json"));
+        assert!(args.iter().any(|a| a == "--skip-git-repo-check"));
         assert!(args
             .windows(2)
-            .any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
-        assert!(args.iter().any(|a| a == "--verbose"));
+            .any(|w| w[0] == "--ask-for-approval" && w[1] == "never"));
         assert!(args
             .windows(2)
-            .any(|w| w[0] == "--model" && w[1] == "claude-opus-4-7"));
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--permission-mode" && w[1] == "acceptEdits"));
-        assert!(args
-            .windows(2)
-            .any(|w| w[0] == "--append-system-prompt" && w[1] == "system body"));
-        // Positional prompt fenced behind `--` so it can't be misread.
-        assert!(args.windows(2).any(|w| w[0] == "--" && w[1] == "user body"));
-        assert_eq!(std_cmd.get_program(), "/usr/local/bin/claude");
+            .any(|w| w[0] == "--model" && w[1] == "gpt-5-codex"));
+        assert!(args.iter().any(|a| a == "--quiet"));
+        assert!(args.iter().any(|a| a == "--json-trace"));
+        // Trailing `-` reads the prompt from stdin.
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+        assert_eq!(std_cmd.get_program(), "/usr/local/bin/codex");
         assert_eq!(std_cmd.get_current_dir(), Some(dir.path()));
     }
 
     #[tokio::test]
-    async fn build_command_applies_model_override_and_extra_args() {
-        // A `[agent.claude_code] model = "..."` override beats the per-role
-        // model in `req.model`, and `extra_args` get spliced in before the
-        // positional `--` prompt sigil. Both have to actually reach the spawned
-        // command, otherwise pitboss silently drops user config.
-        let agent = ClaudeCodeAgent::with_binary("claude")
-            .with_extra_args(vec!["--max-turns".into(), "50".into()])
-            .with_model_override("claude-opus-4-7");
+    async fn build_command_uses_request_model_when_no_override() {
+        let agent = CodexAgent::with_binary("codex");
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
         let req = AgentRequest {
             role: Role::Implementer,
-            model: "role-default-model".into(),
-            system_prompt: "sys".into(),
-            user_prompt: "u".into(),
-            workdir: dir.path().to_path_buf(),
-            log_path: log,
-            timeout: Duration::from_secs(1),
-        };
-        let cmd = agent.build_command(&req);
-        let args: Vec<String> = cmd
-            .as_std()
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            args.windows(2)
-                .any(|w| w[0] == "--model" && w[1] == "claude-opus-4-7"),
-            "model override should win over req.model: {args:?}"
-        );
-        assert!(
-            !args.iter().any(|a| a == "role-default-model"),
-            "req.model must not leak when override is set: {args:?}"
-        );
-        assert!(
-            args.windows(2)
-                .any(|w| w[0] == "--max-turns" && w[1] == "50"),
-            "extra_args missing: {args:?}"
-        );
-        let max_turns_idx = args.iter().position(|a| a == "--max-turns").unwrap();
-        let dashdash_idx = args.iter().position(|a| a == "--").unwrap();
-        assert!(
-            max_turns_idx < dashdash_idx,
-            "extra_args must appear before the positional `--` sigil: {args:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn build_command_omits_append_system_prompt_when_empty() {
-        let agent = ClaudeCodeAgent::with_binary("claude");
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("run.log");
-        let req = AgentRequest {
-            role: Role::Implementer,
-            model: "claude-sonnet".into(),
+            model: "o4-mini".into(),
             system_prompt: String::new(),
             user_prompt: "u".into(),
             workdir: dir.path().to_path_buf(),
@@ -675,25 +659,59 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(!args.iter().any(|a| a == "--append-system-prompt"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--model" && w[1] == "o4-mini"));
     }
 
-    /// Real end-to-end test against the actual `claude` binary on PATH.
+    #[test]
+    fn build_stdin_payload_concatenates_system_and_user_with_blank_line() {
+        let req = AgentRequest {
+            role: Role::Implementer,
+            model: "x".into(),
+            system_prompt: "you are a careful engineer".into(),
+            user_prompt: "implement phase 02".into(),
+            workdir: std::env::temp_dir(),
+            log_path: std::env::temp_dir().join("never.log"),
+            timeout: Duration::from_secs(1),
+        };
+        let payload = String::from_utf8(build_stdin_payload(&req)).unwrap();
+        assert!(payload.starts_with("you are a careful engineer\n\n"));
+        assert!(payload.contains("implement phase 02"));
+        assert!(payload.ends_with('\n'));
+    }
+
+    #[test]
+    fn build_stdin_payload_omits_system_when_empty() {
+        let req = AgentRequest {
+            role: Role::Implementer,
+            model: "x".into(),
+            system_prompt: String::new(),
+            user_prompt: "just the user body".into(),
+            workdir: std::env::temp_dir(),
+            log_path: std::env::temp_dir().join("never.log"),
+            timeout: Duration::from_secs(1),
+        };
+        let payload = String::from_utf8(build_stdin_payload(&req)).unwrap();
+        assert_eq!(payload, "just the user body\n");
+    }
+
+    /// Real end-to-end test against the actual `codex` binary on PATH.
     /// Skipped unless `PITBOSS_REAL_AGENT_TESTS=1` so CI doesn't burn tokens.
     #[tokio::test]
-    async fn real_claude_smoke_test() {
+    async fn real_codex_smoke_test() {
         if std::env::var("PITBOSS_REAL_AGENT_TESTS").ok().as_deref() != Some("1") {
-            eprintln!("skipping real_claude_smoke_test (set PITBOSS_REAL_AGENT_TESTS=1 to run)");
+            eprintln!("skipping real_codex_smoke_test (set PITBOSS_REAL_AGENT_TESTS=1 to run)");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run.log");
-        let agent = ClaudeCodeAgent::new();
+        let agent = CodexAgent::new();
         let (tx, _rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let req = AgentRequest {
             role: Role::Implementer,
-            model: "haiku".into(),
+            model: "o4-mini".into(),
             system_prompt: String::new(),
             user_prompt: "respond with the single word OK".into(),
             workdir: dir.path().to_path_buf(),
@@ -703,7 +721,7 @@ mod tests {
         let outcome = agent.run(req, tx, cancel).await.unwrap();
         assert!(
             matches!(outcome.stop_reason, StopReason::Completed),
-            "real claude run did not complete: {:?}",
+            "real codex run did not complete: {:?}",
             outcome.stop_reason
         );
         assert_eq!(outcome.exit_code, 0);

@@ -7,12 +7,12 @@
 
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-007EC6)](#license)
-[![Agent](https://img.shields.io/badge/agent-Claude%20Code-D97757)](https://docs.anthropic.com)
+[![Agents](https://img.shields.io/badge/agents-Claude%20%C2%B7%20Codex%20%C2%B7%20Aider%20%C2%B7%20Gemini-7C3AED)](#agent-backends)
 [![CI](https://github.com/elicpeter/pitboss/actions/workflows/ci.yml/badge.svg)](https://github.com/elicpeter/pitboss/actions/workflows/ci.yml)
 
 </div>
 
-Pitboss is a Rust CLI that drives a coding agent (Claude Code today, others pluggable) through a multi-phase implementation plan. It runs your test suite after every phase, retries failures with a fixer agent, audits the diff, lands a commit, then moves on. Bounded retries everywhere. Token and dollar budgets. A live TUI if you want to watch.
+Pitboss is a Rust CLI that drives a coding agent through a multi-phase implementation plan. Claude Code is the default; OpenAI's Codex CLI, Aider, and Gemini CLI are also wired in and selectable from `pitboss.toml` (see [Agent backends](#agent-backends)). It runs your test suite after every phase, retries failures with a fixer agent, audits the diff, lands a commit, then moves on. Bounded retries everywhere. Token and dollar budgets. A live TUI if you want to watch.
 
 <div align="center">
   <img src="assets/pitboss-tui.png" alt="pitboss run --tui dashboard" width="900"/>
@@ -26,8 +26,10 @@ Pitboss is a Rust CLI that drives a coding agent (Claude Code today, others plug
 - [How it works](#how-it-works)
 - [Install](#install)
 - [Quickstart](#quickstart)
+- [Generating a plan](#generating-a-plan)
 - [The run loop](#the-run-loop)
 - [Configuration](#configuration)
+- [Agent backends](#agent-backends)
 - [Test runner detection](#test-runner-detection)
 - [Dry runs and verbose output](#dry-runs-and-verbose-output)
 - [Workspace layout](#workspace-layout)
@@ -59,9 +61,15 @@ cargo install --path .
 
 To actually drive the agent you also need:
 
-- **`claude`**, the Claude Code CLI from Anthropic.
+- **`claude`**, the Claude Code CLI from Anthropic. Required for the default backend; optional if you select a different one in `pitboss.toml`.
 - **`git`**, any reasonably recent version.
 - **`gh`** (optional), only if you want `--pr` to open pull requests.
+
+If you plan to swap backends, install whichever CLI you intend to use instead of (or in addition to) `claude`:
+
+- **`codex`**, only if `[agent] backend = "codex"`. See [Agent backends](#agent-backends).
+- **`aider`**, only if `[agent] backend = "aider"`.
+- **`gemini`**, only if `[agent] backend = "gemini"`.
 
 ## Quickstart
 
@@ -83,11 +91,39 @@ pitboss status              # check progress at any time
 
 A few entry points worth knowing:
 
-- `pitboss plan "build a CLI todo app in Rust"` invokes the planner agent to draft `plan.md` for you.
+- `pitboss plan "build a CLI todo app in Rust"` has the planner agent draft `plan.md` for you. Add `--interview` to answer design questions first and get a more targeted plan (see [Generating a plan](#generating-a-plan)).
 - `pitboss run --tui` swaps the stderr logger for the dashboard above.
 - `pitboss run --pr` (or `git.create_pr = true`) opens a pull request with `gh pr create` after the run finishes.
 - `pitboss resume` picks up where a halted run left off.
 - `pitboss abort --checkout-original` marks the run aborted and switches HEAD back to the branch you were on before `pitboss run`.
+
+## Generating a plan
+
+`pitboss plan "my goal"` calls the planner agent to draft `plan.md`. Give it a plain description of the feature or change; the planner also reads the repo layout, manifests, and README for context.
+
+```sh
+pitboss plan "add JSON export to the audit report"
+pitboss plan "add JSON export to the audit report" --force   # overwrite an existing plan.md
+```
+
+### Interview mode
+
+Pass `--interview` and pitboss runs a design session before calling the planner. The agent generates targeted questions about your goal, asks them one by one in the terminal, and uses your answers to write a more concrete `plan.md`.
+
+```sh
+pitboss plan --interview "add a --watch mode to the build CLI"
+```
+
+<div align="center">
+  <img src="assets/pitboss-interview.png" alt="pitboss plan --interview session" width="900"/>
+</div>
+<div align="center">
+  <sub align="center"><i>`pitboss plan --interview`. The agent asks design questions, you answer, then the planner runs with the full context.</i></sub>
+</div>
+
+Questions cover things like interface design, data structures, edge cases, and test approach. Press Enter to skip any question you don't want to answer. The Q&A is compiled into a design spec and handed to the planner alongside the goal, so the resulting plan reflects decisions you made up front rather than ones the agent guessed at.
+
+The number of questions varies with the goal; the agent caps at 50.
 
 ## The run loop
 
@@ -154,6 +190,11 @@ create_pr     = false            # equivalent to `pitboss run --pr`
 # [budgets.pricing.claude-opus-4-7]
 # input_per_million_usd  = 15.0
 # output_per_million_usd = 75.0
+
+# Caveman mode. Off by default. See "Caveman mode" below.
+[caveman]
+enabled   = false
+intensity = "full"   # one of: lite, full, ultra
 ```
 
 ### Per-role model recommendations
@@ -168,6 +209,107 @@ The defaults set every role to the latest Opus, which is fine if you don't want 
 | `fixer`       | `claude-sonnet-4-6`  | Test fix-ups are usually small and local.            |
 
 Configure pricing for any model you reference in `[models]` so `pitboss status` and the USD budget check produce accurate numbers.
+
+### Caveman mode
+
+Pitboss can prepend a "talk like caveman" directive to every agent system prompt to cut output tokens. The idea comes from the [caveman skill](https://github.com/JuliusBrussee/caveman): drop articles, filler words, and pleasantries while keeping technical content exact. Output drops by roughly 65 to 75 percent on prose. Code blocks, commit messages, PR descriptions, and the structured `plan.md` and `deferred.md` artifacts stay in their normal format so downstream parsing is not affected.
+
+Off by default. Flip `enabled = true` in the `[caveman]` block above to turn it on. Three intensity levels:
+
+| Level   | What it does                                                                       |
+| ------- | ---------------------------------------------------------------------------------- |
+| `lite`  | Drops filler and hedging only. Keeps articles and full sentences. Lowest risk.     |
+| `full`  | Drops articles too, allows fragments, prefers short synonyms. The skill's default. |
+| `ultra` | Heavy abbreviation (DB, auth, fn, impl). Arrows for causality. Most compression.   |
+
+Works on every backend. Claude Code receives the directive via `--append-system-prompt`; Codex and Aider get it concatenated ahead of the user prompt.
+
+One tradeoff worth knowing. The planner, fixer, and auditor each produce output that the next role reads as input. Terser plan and audit prose can lose detail the next role would have used. A reasonable approach is to start with `lite`, watch a run or two, then move up to `full` or `ultra` if the plans and audits still hold up.
+
+## Agent backends
+
+Pitboss dispatches every implementer / fixer / auditor / planner role through a pluggable backend that wraps an external coding-agent CLI. Pick one in `pitboss.toml`:
+
+```toml
+[agent]
+backend = "claude_code"   # one of: claude_code (default), codex, aider, gemini
+```
+
+Each backend has its own optional sub-table for binary path, extra arguments, and a model override that wins over the role-level `[models]` table when set:
+
+```toml
+[agent.<backend>]
+binary     = "/usr/local/bin/<cli>"   # default: resolve on PATH
+extra_args = ["--flag", "value"]      # appended to every invocation
+model      = "<model-id>"             # optional, beats [models].<role>
+```
+
+Omit `[agent]` entirely and pitboss runs with `claude_code` and PATH-resolved `claude`, same as it always has.
+
+### Claude Code (default)
+
+The reference backend, built on Anthropic's Claude Code CLI. Streams structured JSON events, populates `AgentOutcome` directly from them, and is the only backend that exercises every code path the runner relies on.
+
+- **Binary:** `claude` ([install](https://docs.anthropic.com))
+- **Config:**
+  ```toml
+  [agent]
+  backend = "claude_code"
+
+  [agent.claude_code]
+  # binary, extra_args, model are all optional
+  ```
+- **Limitations:** none known.
+
+### OpenAI Codex CLI
+
+Wraps OpenAI's `codex` CLI. The agent concatenates the system and user prompts, pipes them on stdin, and parses the newline-delimited JSON event stream into `AgentOutcome`.
+
+- **Binary:** `codex`
+- **Config:**
+  ```toml
+  [agent]
+  backend = "codex"
+
+  [agent.codex]
+  model = "gpt-5-codex"
+  ```
+- **Limitations:** none known.
+
+### Aider
+
+Wraps the `aider` CLI. The phase prompt is delivered via inline `--message <body>`; output parsing keys off Aider's plain-text edit/commit prefixes (`Applied edit to ...`, `Commit ...`).
+
+- **Binary:** `aider`
+- **Config:**
+  ```toml
+  [agent]
+  backend = "aider"
+
+  [agent.aider]
+  model      = "sonnet"
+  extra_args = ["--yes-always", "--map-tokens", "0"]
+  ```
+- **Limitations:**
+  - **No per-phase file-scope auto-discovery.** Aider only edits files added to its chat. Until pitboss grows a per-phase scope mechanism, enumerate the relevant paths yourself via `extra_args = ["--file", "src/foo.rs", "--file", "src/bar.rs"]`.
+  - **Prompt size capped by `ARG_MAX`.** The current `--message <body>` argv path is bounded by the OS argument limit (~256 KB on macOS, ~2 MB on Linux). Comfortable today; a future change will switch to `--message-file` for large payloads.
+
+### Gemini CLI
+
+Wraps Google's `gemini` CLI in single-shot JSON-output mode. The phase prompt is passed as `--prompt <body>`; the terminal JSON document is parsed for the response and tool-call summary.
+
+- **Binary:** `gemini`
+- **Config:**
+  ```toml
+  [agent]
+  backend = "gemini"
+
+  [agent.gemini]
+  model = "gemini-2.5-pro"
+  ```
+- **Limitations:**
+  - **Prompt size capped by `ARG_MAX`.** Same inline-argv exposure as Aider; will be resolved alongside it via a shared inline-vs-stdin helper.
+  - **Tool-call ordering is approximate.** Gemini's JSON stats report tool usage as a name → count map, so the dashboard's tool-call list reflects map-iteration order, not the model's actual call sequence. Cosmetic; the run itself is unaffected.
 
 ## Test runner detection
 
@@ -266,7 +408,7 @@ The [`examples/`](examples) directory contains a walkthrough plan you can copy i
 ```
 src/
 ├── main.rs          CLI entry, wires the tracing subscriber
-├── cli/             clap commands (init, plan, run, status, resume, abort)
+├── cli/             clap commands (init, plan, run, status, resume, abort, interview)
 ├── plan/            Plan/Phase types, parser, snapshot
 ├── deferred/        DeferredDoc/items/phases, parser
 ├── state/           RunState, atomic IO

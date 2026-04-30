@@ -1,16 +1,15 @@
 ---
 source: src/tui/app.rs
-assertion_line: 616
 expression: snap
 ---
 pitboss  run 20260430T120000Z  branch pitboss/run-20260430T120000Z              
 phase 02 — Domain types   [halted: plan tampered]                               
+agent claude-code  model claude-opus-4-7                                        
 ────────────────────────────────────────────────────────────────────────────────
 ┌ phases (0/3) ────────────────┐┌ agent output ────────────────────────────────┐
 │· 01 Project foundation       ││[halt] phase 02: plan.md was modified by the  │
 │x 02 Domain types  (1x)       ││agent                                         │
 │· 03 Plan parser              ││                                              │
-│                              ││                                              │
 │                              ││                                              │
 │                              ││                                              │
 │                              ││                                              │

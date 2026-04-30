@@ -15,7 +15,7 @@
 
 mod app;
 
-pub use app::{Activity, App, PhaseStatus, OUTPUT_BUFFER_LINES};
+pub use app::{Activity, AgentDisplay, App, PhaseStatus, OUTPUT_BUFFER_LINES};
 
 use std::io;
 use std::time::Duration;
@@ -35,7 +35,9 @@ use ratatui::Terminal;
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 
+use crate::agent::backend::BackendKind;
 use crate::agent::Agent;
+use crate::config::{BackendOverrides, Config};
 use crate::git::Git;
 use crate::runner::{Event, RunSummary, Runner};
 
@@ -45,7 +47,8 @@ use crate::runner::{Event, RunSummary, Runner};
 /// alternate-screen / raw mode, and runs the input + render loop concurrently
 /// with [`Runner::run`]. Returns whatever the runner returned, or `None`
 /// when the user quit before the runner finished. The terminal is always
-/// restored before this function returns.
+/// restored before this function returns — including on early-return
+/// errors and unwinding panics — so mouse capture never outlives the run.
 pub async fn run<A, G>(runner: &mut Runner<A, G>) -> Result<Option<RunSummary>>
 where
     A: Agent + Send + Sync + 'static,
@@ -53,23 +56,60 @@ where
 {
     let plan = runner.plan().clone();
     let state = runner.state().clone();
+    let agent_display = build_agent_display(runner.config(), runner.agent().name());
     let rx = runner.subscribe();
 
-    let mut terminal = setup_terminal().context("tui: setting up terminal")?;
-    let app = App::new(plan, state);
+    let mut guard = TerminalGuard::setup().context("tui: setting up terminal")?;
+    let app = App::new(plan, state, agent_display);
 
     let outcome = tokio::select! {
         biased;
-        result = run_loop(&mut terminal, app, rx) => Outcome::User(result?),
+        result = run_loop(guard.terminal(), app, rx) => Outcome::User(result?),
         result = runner.run() => Outcome::Runner(result?),
     };
 
-    restore_terminal(&mut terminal).context("tui: restoring terminal")?;
+    guard.restore().context("tui: restoring terminal")?;
 
     match outcome {
         Outcome::Runner(summary) => Ok(Some(summary)),
         Outcome::User(UserOutcome::Quit) => Ok(None),
         Outcome::User(UserOutcome::ChannelClosed) => Ok(None),
+    }
+}
+
+/// Resolve the per-role model strings the header should display.
+///
+/// A `[agent.<backend>] model = "..."` override wins over `[models].<role>`
+/// when set — that mirrors the precedence the four backend adapters apply at
+/// dispatch time (`with_model_override` beats `req.model`). An unknown
+/// backend string in `cfg.agent.backend` is treated as the default
+/// (Claude Code) for display purposes; the runner itself surfaces the parse
+/// error before the TUI ever runs.
+fn build_agent_display(cfg: &Config, agent_name: &str) -> AgentDisplay {
+    let kind = cfg
+        .agent
+        .backend
+        .as_deref()
+        .and_then(|s| s.parse::<BackendKind>().ok())
+        .unwrap_or_default();
+    let overrides: &BackendOverrides = match kind {
+        BackendKind::ClaudeCode => &cfg.agent.claude_code,
+        BackendKind::Codex => &cfg.agent.codex,
+        BackendKind::Aider => &cfg.agent.aider,
+        BackendKind::Gemini => &cfg.agent.gemini,
+    };
+    let resolve = |role_default: &str| {
+        overrides
+            .model
+            .as_deref()
+            .unwrap_or(role_default)
+            .to_string()
+    };
+    AgentDisplay {
+        agent_name: agent_name.to_string(),
+        implementer_model: resolve(&cfg.models.implementer),
+        fixer_model: resolve(&cfg.models.fixer),
+        auditor_model: resolve(&cfg.models.auditor),
     }
 }
 
@@ -87,24 +127,76 @@ enum UserOutcome {
     ChannelClosed,
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+/// RAII wrapper around the terminal setup/teardown.
+///
+/// `Drop` does a best-effort restore so an unwinding panic or an early-return
+/// `?` inside [`run`] does not leak raw mode / mouse capture into the user's
+/// shell — that would cause the terminal to echo SGR mouse-tracking escape
+/// sequences as visible input on every mouse movement after pitboss exits.
+/// The explicit [`Self::restore`] path surfaces teardown errors when nothing
+/// else has gone wrong; the `Drop` path swallows them because we cannot
+/// usefully report errors during unwinding.
+struct TerminalGuard {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    active: bool,
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+impl TerminalGuard {
+    fn setup() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+            let _ = disable_raw_mode();
+            return Err(e.into());
+        }
+        let backend = CrosstermBackend::new(stdout);
+        match Terminal::new(backend) {
+            Ok(terminal) => Ok(Self {
+                terminal,
+                active: true,
+            }),
+            Err(e) => {
+                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                let _ = disable_raw_mode();
+                Err(e.into())
+            }
+        }
+    }
+
+    fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
+        &mut self.terminal
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        disable_raw_mode()?;
+        execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+        self.terminal.show_cursor()?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        );
+        let _ = self.terminal.show_cursor();
+    }
 }
 
 /// Frame interval. Aggressive enough for streaming agent output to feel
@@ -191,7 +283,13 @@ mod tests {
             }],
         );
         let state = RunState::new("rid", "branch", pid("01"));
-        App::new(plan, state)
+        let agent_display = AgentDisplay {
+            agent_name: "claude-code".into(),
+            implementer_model: "claude-opus-4-7".into(),
+            fixer_model: "claude-sonnet-4-6".into(),
+            auditor_model: "claude-sonnet-4-6".into(),
+        };
+        App::new(plan, state, agent_display)
     }
 
     #[test]
@@ -233,5 +331,64 @@ mod tests {
         let quit = handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::empty());
         assert!(!quit);
         assert!(!app.is_paused());
+    }
+
+    #[test]
+    fn build_agent_display_uses_role_models_when_no_backend_override() {
+        // Bare `[models]` with no per-backend `model` override: every role's
+        // header chip resolves to the role-level model verbatim.
+        let mut cfg = Config::default();
+        cfg.models.implementer = "claude-opus-4-7".into();
+        cfg.models.fixer = "claude-sonnet-4-6".into();
+        cfg.models.auditor = "claude-haiku-4-5".into();
+        let display = build_agent_display(&cfg, "claude-code");
+        assert_eq!(display.agent_name, "claude-code");
+        assert_eq!(display.implementer_model, "claude-opus-4-7");
+        assert_eq!(display.fixer_model, "claude-sonnet-4-6");
+        assert_eq!(display.auditor_model, "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn build_agent_display_applies_backend_model_override_to_every_role() {
+        // The `[agent.<backend>] model = "..."` override wins over the
+        // role-level `[models]` table at dispatch time, so the header chip
+        // must follow the same precedence — otherwise the displayed model
+        // would lie about what the backend is actually invoking.
+        let mut cfg = Config::default();
+        cfg.agent.backend = Some("codex".into());
+        cfg.agent.codex.model = Some("gpt-5-codex".into());
+        cfg.models.implementer = "claude-opus-4-7".into();
+        cfg.models.fixer = "claude-sonnet-4-6".into();
+        cfg.models.auditor = "claude-haiku-4-5".into();
+        let display = build_agent_display(&cfg, "codex");
+        assert_eq!(display.implementer_model, "gpt-5-codex");
+        assert_eq!(display.fixer_model, "gpt-5-codex");
+        assert_eq!(display.auditor_model, "gpt-5-codex");
+    }
+
+    #[test]
+    fn build_agent_display_falls_back_to_default_backend_for_unknown_string() {
+        // An invalid `agent.backend` string at the TUI layer is non-fatal —
+        // the runner has already accepted the config by the time we render,
+        // and the header just degrades to the default backend's overrides
+        // (which are empty by default, so the `[models]` table wins).
+        let mut cfg = Config::default();
+        cfg.agent.backend = Some("not-a-backend".into());
+        cfg.models.implementer = "x-impl".into();
+        let display = build_agent_display(&cfg, "claude-code");
+        assert_eq!(display.implementer_model, "x-impl");
+    }
+
+    #[test]
+    fn build_agent_display_unused_backend_overrides_do_not_leak() {
+        // Setting `[agent.aider] model = ...` while running with
+        // `backend = "codex"` must not leak the aider override into the
+        // header — only the *active* backend's overrides apply.
+        let mut cfg = Config::default();
+        cfg.agent.backend = Some("codex".into());
+        cfg.agent.aider.model = Some("aider-only-model".into());
+        cfg.models.implementer = "role-default".into();
+        let display = build_agent_display(&cfg, "codex");
+        assert_eq!(display.implementer_model, "role-default");
     }
 }

@@ -321,6 +321,18 @@ impl<A: Agent, G: Git> Runner<A, G> {
         &self.state
     }
 
+    /// Borrow the loaded config. Used by the TUI to populate the agent /
+    /// per-role model header chip.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Borrow the dispatching agent. Used by the TUI to read
+    /// [`Agent::name`] for the header chip.
+    pub fn agent(&self) -> &A {
+        &self.agent
+    }
+
     /// Borrow the git handle the runner is using. CLI code that needs to call
     /// post-run git operations (e.g., `gh pr create` after a successful run)
     /// reaches in through here so the same shell-vs-mock implementation the
@@ -410,7 +422,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
         let request = AgentRequest {
             role: Role::Implementer,
             model: self.config.models.implementer.clone(),
-            system_prompt: String::new(),
+            system_prompt: prompts::caveman::system_prompt(&self.config.caveman),
             user_prompt,
             workdir: self.workspace.clone(),
             log_path,
@@ -727,7 +739,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             let request = AgentRequest {
                 role: Role::Fixer,
                 model: self.config.models.fixer.clone(),
-                system_prompt: String::new(),
+                system_prompt: prompts::caveman::system_prompt(&self.config.caveman),
                 user_prompt,
                 workdir: self.workspace.clone(),
                 log_path,
@@ -826,7 +838,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
         let request = AgentRequest {
             role: Role::Auditor,
             model: self.config.models.auditor.clone(),
-            system_prompt: String::new(),
+            system_prompt: prompts::caveman::system_prompt(&self.config.caveman),
             user_prompt,
             workdir: self.workspace.clone(),
             log_path,
@@ -1041,7 +1053,7 @@ fn log_event_line(event: &Event) {
                 col(
                     c,
                     style::BOLD_WHITE,
-                    &format!("phase {phase_id} ({title}) — attempt {attempt}")
+                    &format!("phase {phase_id} ({title}), attempt {attempt}")
                 )
             );
             if c {

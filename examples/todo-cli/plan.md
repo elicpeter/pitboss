@@ -3,7 +3,7 @@ current_phase: "01"
 project: todo-cli
 ---
 
-# Todo CLI — Implementation Plan
+# Todo CLI Implementation Plan
 
 A tiny Rust binary that reads and writes a flat JSON file on disk and exposes
 `add`, `list`, `done`, and `rm` subcommands. Designed as a pitboss dogfood
@@ -67,7 +67,7 @@ backed by phase 02's `Store`.
 
 # Phase 04: Polish
 
-**Scope.** Round-out UX — exit codes, color, `--help` examples — and document
+**Scope.** Round-out UX (exit codes, color, `--help` examples) and document
 what the binary does.
 
 **Deliverables.**

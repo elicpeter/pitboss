@@ -82,6 +82,26 @@ impl ShellGit {
         }
         Ok(out)
     }
+
+    /// Whether `path` is currently covered by a `.gitignore` rule. Exit 0 from
+    /// `git check-ignore -q` means ignored, 1 means not, anything else is a
+    /// real failure.
+    async fn path_is_ignored(&self, path: &Path) -> Result<bool> {
+        let path_str = path.to_string_lossy();
+        let out = self
+            .run("check_ignore", &["check-ignore", "-q", "--", &path_str])
+            .await?;
+        match out.status {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GitError::Command {
+                operation: "check_ignore".into(),
+                exit: out.status,
+                stderr: out.stderr,
+            }
+            .into()),
+        }
+    }
 }
 
 struct CommandOut {
@@ -141,8 +161,19 @@ impl Git for ShellGit {
         // makes everything after it a path/pathspec and disables further
         // option parsing, which protects us if a user-supplied path starts
         // with `-`.
-        let mut args: Vec<String> = vec!["add".into(), "-A".into(), "--".into(), ".".into()];
+        //
+        // Drop exclude entries already covered by `.gitignore`: naming an
+        // ignored path in a `:!<path>` pathspec still trips `git add`'s
+        // "paths are ignored" warning and a non-zero exit, even though the
+        // path would be skipped silently anyway.
+        let mut effective: Vec<&Path> = Vec::with_capacity(exclude.len());
         for p in exclude {
+            if !self.path_is_ignored(p).await? {
+                effective.push(p);
+            }
+        }
+        let mut args: Vec<String> = vec!["add".into(), "-A".into(), "--".into(), ".".into()];
+        for p in effective {
             args.push(format!(":!{}", p.display()));
         }
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -398,6 +429,41 @@ mod tests {
         let staged = String::from_utf8(staged.stdout).unwrap();
         let lines: Vec<&str> = staged.lines().collect();
         assert_eq!(lines, vec!["src/foo.rs"], "staged set: {lines:?}");
+    }
+
+    #[tokio::test]
+    async fn stage_changes_tolerates_excluded_path_already_in_gitignore() {
+        // Regression: when `.pitboss/` is in `.gitignore` AND on disk, naming
+        // it in a `:!` exclude pathspec used to trip git's "paths are ignored"
+        // error and fail the stage. `stage_changes` now filters such entries
+        // out so the call succeeds and only the real source change is staged.
+        let dir = fresh_repo().await;
+        let git = ShellGit::new(dir.path());
+
+        fs::write(dir.path().join(".gitignore"), ".pitboss/\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
+        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
+
+        git.stage_changes(&[
+            Path::new("plan.md"),
+            Path::new("deferred.md"),
+            Path::new(".pitboss"),
+        ])
+        .await
+        .unwrap();
+
+        let staged = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(dir.path())
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap();
+        let staged = String::from_utf8(staged.stdout).unwrap();
+        let mut lines: Vec<&str> = staged.lines().collect();
+        lines.sort();
+        assert_eq!(lines, vec![".gitignore", "src/foo.rs"], "staged: {lines:?}");
     }
 
     #[tokio::test]
