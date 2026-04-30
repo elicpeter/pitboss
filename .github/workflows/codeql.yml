@@ -22,7 +22,7 @@ jobs:
       matrix:
         language: [rust, actions]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - if: matrix.language == 'rust'
         uses: dtolnay/rust-toolchain@stable
