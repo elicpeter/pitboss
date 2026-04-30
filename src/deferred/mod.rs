@@ -1,11 +1,18 @@
-//! `deferred.md` domain types.
+//! `deferred.md` domain types and (de)serialization.
 //!
-//! Phase 2 introduces the type vocabulary; phase 4 adds parsing, serialization,
-//! and snapshot/verify utilities on top.
+//! Phase 2 introduced the type vocabulary; phase 4 adds parsing, serialization,
+//! sweep, and snapshot/verify utilities. Snapshot/verify are re-exported from
+//! [`crate::plan`] because the underlying SHA-256 file hash is generic — both
+//! `plan.md` and `deferred.md` use the same bytes-on-disk integrity check.
 
 use serde::{Deserialize, Serialize};
 
 use crate::plan::PhaseId;
+
+mod parse;
+
+pub use parse::{parse, serialize, DeferredParseError};
+pub use crate::plan::{snapshot, verify_unchanged, Snapshot, SnapshotError};
 
 /// A single checkbox item under `## Deferred items`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +48,13 @@ impl DeferredDoc {
     pub fn empty() -> Self {
         Self::default()
     }
+
+    /// Drop every checklist item with `done: true`. Phase blocks are left
+    /// untouched. Called by the runner between phases so completed items don't
+    /// pile up across runs.
+    pub fn sweep(&mut self) {
+        self.items.retain(|item| !item.done);
+    }
 }
 
 #[cfg(test)]
@@ -57,6 +71,58 @@ mod tests {
         let doc = DeferredDoc::empty();
         assert!(doc.items.is_empty());
         assert!(doc.phases.is_empty());
+    }
+
+    #[test]
+    fn sweep_removes_done_items_only() {
+        let mut doc = DeferredDoc {
+            items: vec![
+                DeferredItem {
+                    text: "keep".into(),
+                    done: false,
+                },
+                DeferredItem {
+                    text: "drop".into(),
+                    done: true,
+                },
+                DeferredItem {
+                    text: "also keep".into(),
+                    done: false,
+                },
+            ],
+            phases: vec![DeferredPhase {
+                source_phase: pid("07"),
+                title: "untouched".into(),
+                body: String::new(),
+            }],
+        };
+        doc.sweep();
+        assert_eq!(
+            doc.items,
+            vec![
+                DeferredItem {
+                    text: "keep".into(),
+                    done: false,
+                },
+                DeferredItem {
+                    text: "also keep".into(),
+                    done: false,
+                },
+            ]
+        );
+        assert_eq!(doc.phases.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_re_exports_detect_drift_on_deferred_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deferred.md");
+        std::fs::write(&path, "## Deferred items\n\n- [ ] x\n").unwrap();
+        let snap = snapshot(&path).unwrap();
+        verify_unchanged(&path, &snap).unwrap();
+        std::fs::write(&path, "## Deferred items\n\n- [x] x\n").unwrap();
+        let err = verify_unchanged(&path, &snap).unwrap_err();
+        assert!(matches!(err, SnapshotError::Mismatch { .. }));
     }
 
     #[test]
