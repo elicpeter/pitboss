@@ -12,7 +12,7 @@
 
 </div>
 
-Pitboss is a Rust CLI that drives a coding agent (Claude Code today, others pluggable) through a multi-phase implementation plan. It runs your test suite after every phase, retries failures with a fixer agent, audits the diff, lands a commit, then moves on. Bounded retries everywhere. Token and dollar budgets. A live TUI if you want to watch.
+Pitboss is a Rust CLI that drives a coding agent through a multi-phase implementation plan. Claude Code is the default; OpenAI's Codex CLI, Aider, and Gemini CLI are also wired in and selectable from `pitboss.toml` (see [Agent backends](#agent-backends)). It runs your test suite after every phase, retries failures with a fixer agent, audits the diff, lands a commit, then moves on. Bounded retries everywhere. Token and dollar budgets. A live TUI if you want to watch.
 
 <div align="center">
   <img src="assets/pitboss-tui.png" alt="pitboss run --tui dashboard" width="900"/>
@@ -28,6 +28,7 @@ Pitboss is a Rust CLI that drives a coding agent (Claude Code today, others plug
 - [Quickstart](#quickstart)
 - [The run loop](#the-run-loop)
 - [Configuration](#configuration)
+- [Agent backends](#agent-backends)
 - [Test runner detection](#test-runner-detection)
 - [Dry runs and verbose output](#dry-runs-and-verbose-output)
 - [Workspace layout](#workspace-layout)
@@ -59,9 +60,15 @@ cargo install --path .
 
 To actually drive the agent you also need:
 
-- **`claude`**, the Claude Code CLI from Anthropic.
+- **`claude`**, the Claude Code CLI from Anthropic. Required for the default backend; optional if you select a different one in `pitboss.toml`.
 - **`git`**, any reasonably recent version.
 - **`gh`** (optional), only if you want `--pr` to open pull requests.
+
+If you plan to swap backends, install whichever CLI you intend to use instead of (or in addition to) `claude`:
+
+- **`codex`** — only if `[agent] backend = "codex"`. See [Agent backends](#agent-backends).
+- **`aider`** — only if `[agent] backend = "aider"`.
+- **`gemini`** — only if `[agent] backend = "gemini"`.
 
 ## Quickstart
 
@@ -168,6 +175,91 @@ The defaults set every role to the latest Opus, which is fine if you don't want 
 | `fixer`       | `claude-sonnet-4-6`  | Test fix-ups are usually small and local.            |
 
 Configure pricing for any model you reference in `[models]` so `pitboss status` and the USD budget check produce accurate numbers.
+
+## Agent backends
+
+Pitboss dispatches every implementer / fixer / auditor / planner role through a pluggable backend that wraps an external coding-agent CLI. Pick one in `pitboss.toml`:
+
+```toml
+[agent]
+backend = "claude_code"   # one of: claude_code (default), codex, aider, gemini
+```
+
+Each backend has its own optional sub-table for binary path, extra arguments, and a model override that wins over the role-level `[models]` table when set:
+
+```toml
+[agent.<backend>]
+binary     = "/usr/local/bin/<cli>"   # default: resolve on PATH
+extra_args = ["--flag", "value"]      # appended to every invocation
+model      = "<model-id>"             # optional, beats [models].<role>
+```
+
+Omit `[agent]` entirely and pitboss runs with `claude_code` and PATH-resolved `claude` — same as it always has.
+
+### Claude Code (default)
+
+The reference backend, built on Anthropic's Claude Code CLI. Streams structured JSON events, populates `AgentOutcome` directly from them, and is the only backend that exercises every code path the runner relies on.
+
+- **Binary:** `claude` ([install](https://docs.anthropic.com))
+- **Config:**
+  ```toml
+  [agent]
+  backend = "claude_code"
+
+  [agent.claude_code]
+  # binary, extra_args, model — all optional
+  ```
+- **Limitations:** none known.
+
+### OpenAI Codex CLI
+
+Wraps OpenAI's `codex` CLI. The agent concatenates the system and user prompts, pipes them on stdin, and parses the newline-delimited JSON event stream into `AgentOutcome`.
+
+- **Binary:** `codex`
+- **Config:**
+  ```toml
+  [agent]
+  backend = "codex"
+
+  [agent.codex]
+  model = "gpt-5-codex"
+  ```
+- **Limitations:** none known.
+
+### Aider
+
+Wraps the `aider` CLI. The phase prompt is delivered via inline `--message <body>`; output parsing keys off Aider's plain-text edit/commit prefixes (`Applied edit to ...`, `Commit ...`).
+
+- **Binary:** `aider`
+- **Config:**
+  ```toml
+  [agent]
+  backend = "aider"
+
+  [agent.aider]
+  model      = "sonnet"
+  extra_args = ["--yes-always", "--map-tokens", "0"]
+  ```
+- **Limitations:**
+  - **No per-phase file-scope auto-discovery.** Aider only edits files added to its chat. Until pitboss grows a per-phase scope mechanism, enumerate the relevant paths yourself via `extra_args = ["--file", "src/foo.rs", "--file", "src/bar.rs"]`. Tracked in [`deferred.md`](deferred.md).
+  - **Prompt size capped by `ARG_MAX`.** The current `--message <body>` argv path is bounded by the OS argument limit (~256 KB on macOS, ~2 MB on Linux). Comfortable today; a future change will switch to `--message-file` for large payloads. Tracked in [`deferred.md`](deferred.md).
+
+### Gemini CLI
+
+Wraps Google's `gemini` CLI in single-shot JSON-output mode. The phase prompt is passed as `--prompt <body>`; the terminal JSON document is parsed for the response and tool-call summary.
+
+- **Binary:** `gemini`
+- **Config:**
+  ```toml
+  [agent]
+  backend = "gemini"
+
+  [agent.gemini]
+  model = "gemini-2.5-pro"
+  ```
+- **Limitations:**
+  - **Prompt size capped by `ARG_MAX`.** Same inline-argv exposure as Aider; will be resolved alongside it via a shared inline-vs-stdin helper. Tracked in [`deferred.md`](deferred.md).
+  - **Tool-call ordering is approximate.** Gemini's JSON stats report tool usage as a name → count map, so the dashboard's tool-call list reflects map-iteration order, not the model's actual call sequence. Cosmetic; the run itself is unaffected. Tracked in [`deferred.md`](deferred.md).
 
 ## Test runner detection
 
