@@ -47,7 +47,7 @@ pub enum PlanParseError {
         /// The raw heading line (without trailing newline).
         raw: String,
     },
-    /// A `# Phase` heading carried an unparseable id.
+    /// A `# Phase` heading carried an unparsable id.
     #[error("plan.md heading on line {line} has invalid phase id: {source}")]
     BadHeadingId {
         /// 1-based line number of the offending heading.

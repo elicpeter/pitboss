@@ -67,7 +67,7 @@ pub struct DiffStat {
 
 /// Errors that originate inside the git layer. Most callers carry an
 /// `anyhow::Result`; the typed enum exists so the runner can distinguish, for
-/// example, "command failed" from "output was unparseable".
+/// example, "command failed" from "output was unparsable".
 #[derive(Debug, Error)]
 pub enum GitError {
     /// A `git` invocation exited with a non-success status.
@@ -85,7 +85,7 @@ pub enum GitError {
     UnexpectedOutput {
         /// Operation name, mirroring [`GitError::Command::operation`].
         operation: String,
-        /// The unparseable output, trimmed.
+        /// The unparsable output, trimmed.
         output: String,
     },
 }

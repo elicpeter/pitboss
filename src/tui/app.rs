@@ -291,14 +291,14 @@ impl App {
         ]);
         let act_color = activity_color(&self.activity);
         let line2 = Line::from(vec![
-            Span::styled("phase ", Style::default().fg(Color::DarkGray)),
+            Span::styled("phase ", Style::default().fg(Color::Gray)),
             Span::styled(
                 self.current_phase.to_string(),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" — ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" — ", Style::default().fg(Color::Gray)),
             Span::styled(title.to_string(), Style::default().fg(Color::White)),
             Span::raw("   "),
             Span::styled("[", Style::default().fg(Color::DarkGray)),
@@ -352,7 +352,7 @@ impl App {
                     ),
                     PhaseStatus::Completed => (
                         Style::default().fg(Color::Green),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::Gray),
                     ),
                     PhaseStatus::Failed(_) => (
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -390,7 +390,7 @@ impl App {
                     self.completed.len(),
                     self.plan.phases.len()
                 ),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::Gray),
             ));
         let list = List::new(items).block(block);
         frame.render_widget(list, area);
@@ -415,7 +415,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            (" agent output ", Style::default().fg(Color::DarkGray))
+            (" agent output ", Style::default().fg(Color::Gray))
         };
         let border_style = Style::default().fg(Color::DarkGray);
         let block = Block::default()
@@ -433,7 +433,7 @@ impl App {
         let key_style = Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD);
-        let hint_style = Style::default().fg(Color::DarkGray);
+        let hint_style = Style::default().fg(Color::Gray);
         let line = Line::from(vec![
             Span::styled("q", key_style),
             Span::styled(" quit", hint_style),

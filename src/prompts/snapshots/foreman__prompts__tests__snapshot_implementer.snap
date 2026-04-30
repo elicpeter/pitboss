@@ -56,5 +56,5 @@ body line
 # When you finish
 
 - The test suite the runner detected for this project must pass. The runner will run it after you exit; if it fails, a fixer agent gets up to two attempts before the run halts.
-- `deferred.md` must parse against foreman's grammar (two H2 sections, well-formed checkbox lines under items, well-formed `### From phase X: title` H3s under phases). An unparseable file restores the snapshot and halts the run.
+- `deferred.md` must parse against foreman's grammar (two H2 sections, well-formed checkbox lines under items, well-formed `### From phase X: title` H3s under phases). An unparsable file restores the snapshot and halts the run.
 - `plan.md` and `.foreman/` must be byte-for-byte unchanged. `plan.md` is on disk if you need to peek at neighboring phases for context, but you must not modify it.

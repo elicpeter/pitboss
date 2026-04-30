@@ -126,7 +126,7 @@ pub async fn run_with_agent<A: Agent>(
     }
 
     Err(anyhow!(
-        "planner produced an unparseable plan {} times in a row; last error: {}",
+        "planner produced an unparsable plan {} times in a row; last error: {}",
         MAX_PLANNER_ATTEMPTS,
         last_error.unwrap_or_else(|| "(none captured)".into())
     ))
@@ -474,7 +474,7 @@ current_phase: \"01\"
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("unparseable"),
+            msg.contains("unparsable"),
             "expected a parse-failure summary, got: {msg}"
         );
         assert!(

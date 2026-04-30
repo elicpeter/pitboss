@@ -59,7 +59,7 @@ pub enum HaltReason {
     /// The agent modified `plan.md`. The runner restored from the pre-agent
     /// snapshot before halting.
     PlanTampered,
-    /// The agent left `deferred.md` in an unparseable state. The runner
+    /// The agent left `deferred.md` in an unparsable state. The runner
     /// restored from the pre-agent snapshot before halting. The string is
     /// the parser's diagnostic.
     DeferredInvalid(String),
