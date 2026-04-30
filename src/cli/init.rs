@@ -46,16 +46,17 @@ const DEFERRED_TEMPLATE: &str = "\
 ## Deferred phases
 ";
 
-/// Default `foreman.toml`. The schema is finalized in phase 6; values here are
-/// sensible placeholders so the file parses against any reasonable loader.
+/// Default `foreman.toml`. The values here mirror [`crate::config::Config`]'s
+/// `Default` impl exactly — a freshly initialized workspace round-trips
+/// through `config::load` to `Config::default()`. Edit both together.
 const FOREMAN_TOML_TEMPLATE: &str = "\
 # foreman configuration
 
 [models]
-planner = \"claude-sonnet-4-6\"
-implementer = \"claude-sonnet-4-6\"
-auditor = \"claude-sonnet-4-6\"
-fixer = \"claude-sonnet-4-6\"
+planner = \"claude-opus-4-7\"
+implementer = \"claude-opus-4-7\"
+auditor = \"claude-opus-4-7\"
+fixer = \"claude-opus-4-7\"
 
 [retries]
 fixer_max_attempts = 2
