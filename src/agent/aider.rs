@@ -19,9 +19,8 @@
 //!
 //! ## Prompt assembly
 //!
-//! Aider has no separate system-prompt channel (see `deferred.md`'s phase 19
-//! audit note), so [`AgentRequest::system_prompt`] and
-//! [`AgentRequest::user_prompt`] are concatenated — system first, blank line,
+//! Aider has no separate system-prompt channel, so [`AgentRequest::system_prompt`]
+//! and [`AgentRequest::user_prompt`] are concatenated — system first, blank line,
 //! then user — and the whole payload is passed via `--message <body>`. We use
 //! the inline `--message` flag rather than `--message-file` so there's no temp
 //! file to clean up; the OS's `ARG_MAX` (≥256 KB on every platform pitboss

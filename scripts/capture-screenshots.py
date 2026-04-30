@@ -154,7 +154,7 @@ use pitboss::git::CommitId;
 use pitboss::plan::{Phase, PhaseId, Plan};
 use pitboss::runner::{Event, HaltReason};
 use pitboss::state::RunState;
-use pitboss::tui::App;
+use pitboss::tui::{App, AgentDisplay};
 
 fn pid(s: &str) -> PhaseId {
     PhaseId::parse(s).unwrap()
@@ -191,8 +191,17 @@ fn fresh_state() -> RunState {
     )
 }
 
+fn demo_agent() -> AgentDisplay {
+    AgentDisplay {
+        agent_name: "claude-code".into(),
+        implementer_model: "claude-opus-4-7".into(),
+        fixer_model: "claude-sonnet-4-6".into(),
+        auditor_model: "claude-sonnet-4-6".into(),
+    }
+}
+
 fn build_tui() -> App {
-    let mut app = App::new(three_phase_plan(), fresh_state());
+    let mut app = App::new(three_phase_plan(), fresh_state(), demo_agent());
     app.handle_event(Event::PhaseStarted {
         phase_id: pid("01"),
         title: "Project foundation".into(),
@@ -223,7 +232,7 @@ fn build_tui() -> App {
 }
 
 fn build_halt() -> App {
-    let mut app = App::new(three_phase_plan(), fresh_state());
+    let mut app = App::new(three_phase_plan(), fresh_state(), demo_agent());
     app.handle_event(Event::PhaseStarted {
         phase_id: pid("02"),
         title: "Domain types".into(),

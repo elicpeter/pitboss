@@ -18,9 +18,8 @@
 //!
 //! ## Prompt assembly
 //!
-//! Codex has no separate system-prompt channel (see `deferred.md`'s phase 19
-//! audit note), so [`AgentRequest::system_prompt`] and
-//! [`AgentRequest::user_prompt`] are concatenated — system first, blank line,
+//! Codex has no separate system-prompt channel, so [`AgentRequest::system_prompt`]
+//! and [`AgentRequest::user_prompt`] are concatenated — system first, blank line,
 //! then user — and the whole payload is written to the child's stdin. The CLI
 //! is invoked with the trailing `-` sigil to read its prompt from stdin.
 //!

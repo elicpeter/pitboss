@@ -241,8 +241,8 @@ Wraps the `aider` CLI. The phase prompt is delivered via inline `--message <body
   extra_args = ["--yes-always", "--map-tokens", "0"]
   ```
 - **Limitations:**
-  - **No per-phase file-scope auto-discovery.** Aider only edits files added to its chat. Until pitboss grows a per-phase scope mechanism, enumerate the relevant paths yourself via `extra_args = ["--file", "src/foo.rs", "--file", "src/bar.rs"]`. Tracked in [`deferred.md`](deferred.md).
-  - **Prompt size capped by `ARG_MAX`.** The current `--message <body>` argv path is bounded by the OS argument limit (~256 KB on macOS, ~2 MB on Linux). Comfortable today; a future change will switch to `--message-file` for large payloads. Tracked in [`deferred.md`](deferred.md).
+  - **No per-phase file-scope auto-discovery.** Aider only edits files added to its chat. Until pitboss grows a per-phase scope mechanism, enumerate the relevant paths yourself via `extra_args = ["--file", "src/foo.rs", "--file", "src/bar.rs"]`.
+  - **Prompt size capped by `ARG_MAX`.** The current `--message <body>` argv path is bounded by the OS argument limit (~256 KB on macOS, ~2 MB on Linux). Comfortable today; a future change will switch to `--message-file` for large payloads.
 
 ### Gemini CLI
 
@@ -258,8 +258,8 @@ Wraps Google's `gemini` CLI in single-shot JSON-output mode. The phase prompt is
   model = "gemini-2.5-pro"
   ```
 - **Limitations:**
-  - **Prompt size capped by `ARG_MAX`.** Same inline-argv exposure as Aider; will be resolved alongside it via a shared inline-vs-stdin helper. Tracked in [`deferred.md`](deferred.md).
-  - **Tool-call ordering is approximate.** Gemini's JSON stats report tool usage as a name → count map, so the dashboard's tool-call list reflects map-iteration order, not the model's actual call sequence. Cosmetic; the run itself is unaffected. Tracked in [`deferred.md`](deferred.md).
+  - **Prompt size capped by `ARG_MAX`.** Same inline-argv exposure as Aider; will be resolved alongside it via a shared inline-vs-stdin helper.
+  - **Tool-call ordering is approximate.** Gemini's JSON stats report tool usage as a name → count map, so the dashboard's tool-call list reflects map-iteration order, not the model's actual call sequence. Cosmetic; the run itself is unaffected.
 
 ## Test runner detection
 

@@ -18,9 +18,8 @@
 //!
 //! ## Prompt assembly
 //!
-//! Gemini has no separate system-prompt channel (see `deferred.md`'s phase 19
-//! audit note), so [`AgentRequest::system_prompt`] and
-//! [`AgentRequest::user_prompt`] are concatenated — system first, blank line,
+//! Gemini has no separate system-prompt channel, so [`AgentRequest::system_prompt`]
+//! and [`AgentRequest::user_prompt`] are concatenated — system first, blank line,
 //! then user — and the whole payload is passed via `--prompt <body>`. The OS's
 //! `ARG_MAX` (≥256 KB on every platform pitboss supports) is comfortably above
 //! the prompts the runner produces today.
