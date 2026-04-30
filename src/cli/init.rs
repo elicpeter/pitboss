@@ -17,7 +17,10 @@ use crate::util::write_atomic;
 /// One-phase template seed for `plan.md`. Designed to round-trip through
 /// [`crate::plan::parse`] so a freshly scaffolded plan parses cleanly without
 /// edits.
-const PLAN_TEMPLATE: &str = "\
+///
+/// `pub(crate)` so `cli::plan` can recognize an unmodified seed and silently
+/// overwrite it without `--force` (the canonical `init` → `plan` flow).
+pub(crate) const PLAN_TEMPLATE: &str = "\
 ---
 current_phase: \"01\"
 ---

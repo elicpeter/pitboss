@@ -13,9 +13,13 @@
 //!    diagnostic prepended to the prompt; a second failure is surfaced as a
 //!    hard error.
 //!
-//! `plan.md` is never overwritten silently — `--force` is required when a
-//! file already exists. `pitboss init` writes a placeholder `plan.md`, so the
-//! flag is the normal escape hatch when generating a real plan over the seed.
+//! User-authored `plan.md` content is never overwritten silently — `--force`
+//! is required to clobber an existing file. The one exception is the seed
+//! `pitboss init` writes (see [`crate::cli::init::PLAN_TEMPLATE`]): when the
+//! existing `plan.md` is byte-identical to that seed, the planner overwrites
+//! it without `--force`, since the user demonstrably hasn't touched it. Any
+//! deviation from the seed (even a single edited word) reverts to the
+//! refuse-without-`--force` path.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -78,7 +82,7 @@ pub async fn run_with_agent<A: Agent>(
     agent: &A,
 ) -> Result<PlanRunOutcome> {
     let plan_path = workspace.join("plan.md");
-    if plan_path.exists() && !force {
+    if plan_path.exists() && !force && !is_init_seed(&plan_path)? {
         bail!(
             "plan.md already exists at {}; pass --force to overwrite",
             plan_path.display()
@@ -194,6 +198,19 @@ fn prepend_retry_context(base: &str, err: &str) -> String {
          \n\
          {base}"
     )
+}
+
+/// Whether `path` is byte-identical to the `pitboss init` seed template.
+///
+/// Lets the planner silently overwrite a freshly scaffolded `plan.md`. Any
+/// user edit — even reformatting whitespace — flips this to `false` and the
+/// caller falls back to refusing without `--force`. I/O errors propagate so a
+/// permission-denied or unreadable file surfaces clearly rather than being
+/// misclassified as "not the seed".
+fn is_init_seed(path: &Path) -> Result<bool> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("plan: reading {} for seed comparison", path.display()))?;
+    Ok(bytes == crate::cli::init::PLAN_TEMPLATE.as_bytes())
 }
 
 fn planner_log_path(workspace: &Path, attempt: u32) -> PathBuf {
@@ -428,6 +445,47 @@ current_phase: \"01\"
             after, preexisting,
             "plan.md must be untouched without --force"
         );
+    }
+
+    #[tokio::test]
+    async fn unmodified_init_seed_is_overwritten_without_force() {
+        // `pitboss init` followed by `pitboss plan` is the canonical
+        // first-run flow. The init-seeded `plan.md` must be replaced
+        // silently — requiring `--force` here was a UX bug.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("plan.md"),
+            crate::cli::init::PLAN_TEMPLATE.as_bytes(),
+        )
+        .unwrap();
+        let agent = dry_agent_emitting(CANNED_PLAN);
+
+        let outcome = run_with_agent(dir.path(), "build", false, &agent)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.attempts, 1);
+        let written = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        assert_eq!(written, CANNED_PLAN);
+    }
+
+    #[tokio::test]
+    async fn edited_init_seed_still_requires_force() {
+        // A single byte of user edits over the seed flips it back to the
+        // refuse-without-force path. Anything other than a verbatim seed
+        // is treated as user-authored content.
+        let dir = tempdir().unwrap();
+        let mut edited = crate::cli::init::PLAN_TEMPLATE.to_string();
+        edited.push_str("\nuser added a note here\n");
+        fs::write(dir.path().join("plan.md"), edited.as_bytes()).unwrap();
+        let agent = dry_agent_emitting(CANNED_PLAN);
+
+        let err = run_with_agent(dir.path(), "build", false, &agent)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("--force"), "err: {err}");
+        let after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        assert_eq!(after, edited, "edited plan.md must be untouched");
     }
 
     #[tokio::test]

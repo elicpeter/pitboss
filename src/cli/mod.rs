@@ -52,7 +52,8 @@ pub enum Command {
         /// Free-form description of what to build.
         goal: String,
         /// Overwrite an existing `plan.md`. Without this flag the command
-        /// refuses to clobber a hand-written or `pitboss init` seed file.
+        /// refuses to clobber a hand-written file. An untouched `pitboss init`
+        /// seed is replaced silently and does not require `--force`.
         #[arg(long)]
         force: bool,
     },
