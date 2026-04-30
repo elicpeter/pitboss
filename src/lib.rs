@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod deferred;
 pub mod git;
+pub mod grind;
 pub mod plan;
 pub mod prompts;
 pub mod runner;
