@@ -167,9 +167,7 @@ pub fn load(workspace: impl AsRef<Path>) -> Result<Config> {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
         Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("config::load: reading {:?}", path))
-            );
+            return Err(anyhow::Error::new(e).context(format!("config::load: reading {:?}", path)));
         }
     };
     parse(&text).with_context(|| format!("config::load: parsing {:?}", path))

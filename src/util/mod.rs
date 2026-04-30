@@ -83,11 +83,7 @@ mod write_atomic_tests {
         let leftover: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(".file.txt.tmp")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".file.txt.tmp"))
             .collect();
         assert!(leftover.is_empty(), "temp file should be renamed away");
     }

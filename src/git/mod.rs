@@ -158,7 +158,10 @@ mod tests {
         let at = DateTime::parse_from_rfc3339("2026-04-29T14:30:22Z")
             .unwrap()
             .with_timezone(&Utc);
-        assert_eq!(branch_name("foreman/run-", at), "foreman/run-20260429T143022Z");
+        assert_eq!(
+            branch_name("foreman/run-", at),
+            "foreman/run-20260429T143022Z"
+        );
         assert_eq!(branch_name("", at), "20260429T143022Z");
     }
 

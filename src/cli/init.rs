@@ -212,11 +212,7 @@ fn update_gitignore(workspace: &Path, report: &mut Vec<ReportEntry>) -> Result<(
     let existing = match fs::read_to_string(&path) {
         Ok(s) => Some(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            return Err(
-                anyhow::Error::new(e).context(format!("init: reading {:?}", path))
-            )
-        }
+        Err(e) => return Err(anyhow::Error::new(e).context(format!("init: reading {:?}", path))),
     };
 
     if let Some(ref text) = existing {
@@ -250,9 +246,7 @@ fn has_foreman_entry(text: &str) -> bool {
         }
         // Strip an optional leading slash so `/.foreman/` and `.foreman/` both
         // count as the same entry. Trailing slash is also optional.
-        let canonical = trimmed
-            .trim_start_matches('/')
-            .trim_end_matches('/');
+        let canonical = trimmed.trim_start_matches('/').trim_end_matches('/');
         canonical == ".foreman"
     })
 }
@@ -462,5 +456,4 @@ mod tests {
         assert_eq!(paths_with(&report, Action::Skipped), vec!["plan.md"]);
         assert_eq!(paths_with(&report, Action::Created), vec!["deferred.md"]);
     }
-
 }

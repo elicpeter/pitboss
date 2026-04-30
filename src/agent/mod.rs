@@ -190,13 +190,7 @@ mod tests {
     fn stop_reason_equality_ignores_completion_payload() {
         assert_eq!(StopReason::Completed, StopReason::Completed);
         assert_ne!(StopReason::Completed, StopReason::Timeout);
-        assert_eq!(
-            StopReason::Error("x".into()),
-            StopReason::Error("x".into())
-        );
-        assert_ne!(
-            StopReason::Error("x".into()),
-            StopReason::Error("y".into())
-        );
+        assert_eq!(StopReason::Error("x".into()), StopReason::Error("x".into()));
+        assert_ne!(StopReason::Error("x".into()), StopReason::Error("y".into()));
     }
 }

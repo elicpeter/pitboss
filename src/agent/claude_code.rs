@@ -135,8 +135,7 @@ impl Agent for ClaudeCodeAgent {
             while let Some(ev) = raw_rx.recv().await {
                 match ev {
                     AgentEvent::Stdout(line) => {
-                        handle_stdout_line(&line, &outbound, &mut tokens, &mut error_message)
-                            .await;
+                        handle_stdout_line(&line, &outbound, &mut tokens, &mut error_message).await;
                     }
                     AgentEvent::Stderr(line) => {
                         push_tail(&mut stderr_tail, line.clone(), ERROR_TAIL_LINES);
@@ -263,16 +262,14 @@ async fn handle_stdout_line(
                         "text" => {
                             if let Some(text) = block.get("text").and_then(Value::as_str) {
                                 if !text.is_empty() {
-                                    let _ = outbound
-                                        .send(AgentEvent::Stdout(text.to_string()))
-                                        .await;
+                                    let _ =
+                                        outbound.send(AgentEvent::Stdout(text.to_string())).await;
                                 }
                             }
                         }
                         "tool_use" => {
                             if let Some(name) = block.get("name").and_then(Value::as_str) {
-                                let _ =
-                                    outbound.send(AgentEvent::ToolUse(name.to_string())).await;
+                                let _ = outbound.send(AgentEvent::ToolUse(name.to_string())).await;
                             }
                         }
                         // "thinking" and unknown blocks: log file already has
@@ -392,7 +389,11 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let outcome = agent
-            .run(req_with_log(log.clone(), Duration::from_secs(5)), tx, cancel)
+            .run(
+                req_with_log(log.clone(), Duration::from_secs(5)),
+                tx,
+                cancel,
+            )
             .await
             .unwrap();
         assert_eq!(outcome.stop_reason, StopReason::Completed);

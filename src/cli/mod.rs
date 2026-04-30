@@ -9,7 +9,11 @@ use clap::{Parser, Subcommand};
 pub mod init;
 
 #[derive(Debug, Parser)]
-#[command(name = "foreman", version, about = "Orchestrate coding agents through a phased plan")]
+#[command(
+    name = "foreman",
+    version,
+    about = "Orchestrate coding agents through a phased plan"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

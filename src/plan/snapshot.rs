@@ -77,10 +77,7 @@ pub fn snapshot(path: impl AsRef<Path>) -> Result<Snapshot, SnapshotError> {
 
 /// Verify that the file at `path` still hashes to `expected`. Returns
 /// [`SnapshotError::Mismatch`] on any drift, including whitespace-only changes.
-pub fn verify_unchanged(
-    path: impl AsRef<Path>,
-    expected: &Snapshot,
-) -> Result<(), SnapshotError> {
+pub fn verify_unchanged(path: impl AsRef<Path>, expected: &Snapshot) -> Result<(), SnapshotError> {
     let path = path.as_ref();
     let current = snapshot(path)?;
     if current != *expected {
@@ -142,7 +139,9 @@ mod tests {
         let s = Snapshot::of_bytes(b"abc");
         let h = s.hex();
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]

@@ -157,15 +157,10 @@ impl Git for ShellGit {
 
     async fn commit(&self, message: &str) -> Result<CommitId> {
         let mut cmd = self.cmd();
-        cmd.args([
-            "-c",
-            "user.name=foreman",
-            "-c",
-            "user.email=foreman@local",
-        ])
-        .arg("commit")
-        .arg("-m")
-        .arg(message);
+        cmd.args(["-c", "user.name=foreman", "-c", "user.email=foreman@local"])
+            .arg("commit")
+            .arg("-m")
+            .arg(message);
         let out: CommandOut = cmd
             .stdin(Stdio::null())
             .output()
@@ -180,7 +175,9 @@ impl Git for ShellGit {
             }
             .into());
         }
-        let head = self.run_succeed("rev-parse", &["rev-parse", "HEAD"]).await?;
+        let head = self
+            .run_succeed("rev-parse", &["rev-parse", "HEAD"])
+            .await?;
         Ok(CommitId::new(head.stdout.trim().to_string()))
     }
 
@@ -245,7 +242,10 @@ mod tests {
             .unwrap();
         assert!(status.success());
         // Identity for the seed commit.
-        for (k, v) in [("user.name", "foreman-test"), ("user.email", "foreman@test")] {
+        for (k, v) in [
+            ("user.name", "foreman-test"),
+            ("user.email", "foreman@test"),
+        ] {
             std::process::Command::new("git")
                 .args(["-C"])
                 .arg(dir.path())

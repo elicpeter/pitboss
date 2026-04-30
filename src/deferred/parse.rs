@@ -202,12 +202,12 @@ pub fn parse(input: &str) -> Result<DeferredDoc, DeferredParseError> {
                 });
             }
 
-            let after =
-                rest.strip_prefix("From phase ")
-                    .ok_or_else(|| DeferredParseError::BadPhaseHeading {
-                        line: line_no,
-                        raw: trimmed.to_string(),
-                    })?;
+            let after = rest.strip_prefix("From phase ").ok_or_else(|| {
+                DeferredParseError::BadPhaseHeading {
+                    line: line_no,
+                    raw: trimmed.to_string(),
+                }
+            })?;
             let (id_str, title) =
                 after
                     .split_once(": ")
@@ -215,12 +215,11 @@ pub fn parse(input: &str) -> Result<DeferredDoc, DeferredParseError> {
                         line: line_no,
                         raw: trimmed.to_string(),
                     })?;
-            let id = PhaseId::parse(id_str).map_err(|source| {
-                DeferredParseError::BadPhaseHeadingId {
+            let id =
+                PhaseId::parse(id_str).map_err(|source| DeferredParseError::BadPhaseHeadingId {
                     line: line_no,
                     source,
-                }
-            })?;
+                })?;
 
             current_phase = Some((id, title.to_string(), String::new()));
             continue;
@@ -379,7 +378,8 @@ mod tests {
 
     #[test]
     fn phases_only_round_trip() {
-        let s = "## Deferred phases\n\n### From phase 07: rework agent trait\n\nbody line\n- bullet\n";
+        let s =
+            "## Deferred phases\n\n### From phase 07: rework agent trait\n\nbody line\n- bullet\n";
         let doc = parse(s).unwrap();
         assert!(doc.items.is_empty());
         assert_eq!(doc.phases.len(), 1);
@@ -625,7 +625,8 @@ mod tests {
     fn phases_in_reverse_order_in_input_round_trip_canonicalizes() {
         // Phases section appearing before items is accepted; canonical output
         // moves items first.
-        let s = "## Deferred phases\n\n### From phase 02: a\nbody\n\n## Deferred items\n\n- [ ] x\n";
+        let s =
+            "## Deferred phases\n\n### From phase 02: a\nbody\n\n## Deferred items\n\n- [ ] x\n";
         let doc = parse(s).unwrap();
         let canonical = serialize(&doc);
         assert!(canonical.starts_with("## Deferred items\n"));

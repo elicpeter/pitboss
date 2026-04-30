@@ -108,7 +108,11 @@ impl MockGit {
     /// Drop a path from the synthetic working tree, e.g., to simulate a user
     /// reverting an edit.
     pub fn clear(&self, path: impl AsRef<Path>) {
-        self.state.lock().unwrap().working_tree.remove(path.as_ref());
+        self.state
+            .lock()
+            .unwrap()
+            .working_tree
+            .remove(path.as_ref());
     }
 
     /// Snapshot of every commit recorded so far, oldest first.
@@ -179,8 +183,7 @@ impl Git for MockGit {
     async fn stage_changes(&self, exclude: &[&Path]) -> Result<()> {
         let exclude_paths: Vec<PathBuf> = exclude.iter().map(|p| p.to_path_buf()).collect();
         let mut s = self.state.lock().unwrap();
-        s.ops
-            .push(MockOp::StageChanges(exclude_paths.clone()));
+        s.ops.push(MockOp::StageChanges(exclude_paths.clone()));
         let exclude_set: HashSet<PathBuf> = exclude_paths.into_iter().collect();
         let to_stage: Vec<PathBuf> = s
             .working_tree
@@ -283,9 +286,7 @@ mod tests {
         let plan = Path::new("plan.md");
         let deferred = Path::new("deferred.md");
         let foreman = Path::new(".foreman");
-        git.stage_changes(&[plan, deferred, foreman])
-            .await
-            .unwrap();
+        git.stage_changes(&[plan, deferred, foreman]).await.unwrap();
 
         let exclusions = git.last_exclusions().unwrap();
         assert_eq!(
@@ -299,10 +300,7 @@ mod tests {
 
         // Index should now hold only `src/foo.rs`.
         assert!(git.has_staged_changes().await.unwrap());
-        let id = git
-            .commit("[foreman] phase 01: code only")
-            .await
-            .unwrap();
+        let id = git.commit("[foreman] phase 01: code only").await.unwrap();
         let commits = git.commits();
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].id, id);

@@ -44,9 +44,7 @@ impl PhaseId {
         if raw.is_empty() {
             return Err(PhaseIdParseError::Empty);
         }
-        let split_at = raw
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(raw.len());
+        let split_at = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
         if split_at == 0 {
             return Err(PhaseIdParseError::MissingNumericPrefix(raw.to_string()));
         }
@@ -340,7 +338,10 @@ mod tests {
                 body: "body".into(),
             }],
         );
-        assert_eq!(plan.phase(&id("01")).map(|p| p.title.as_str()), Some("first"));
+        assert_eq!(
+            plan.phase(&id("01")).map(|p| p.title.as_str()),
+            Some("first")
+        );
         assert!(plan.phase(&id("99")).is_none());
     }
 

@@ -227,7 +227,11 @@ impl TestRunner {
 
         let passed = status.success();
         let summary = if passed {
-            format!("{}: passed ({} lines captured)", self.kind.label(), line_count)
+            format!(
+                "{}: passed ({} lines captured)",
+                self.kind.label(),
+                line_count
+            )
         } else {
             let exit = status
                 .code()
@@ -431,20 +435,13 @@ mod tests {
         let runner = detect(dir.path(), None).unwrap();
         assert_eq!(runner.kind, TestRunnerKind::Go);
         assert_eq!(runner.program, "go");
-        assert_eq!(
-            runner.args,
-            vec!["test".to_string(), "./...".to_string()]
-        );
+        assert_eq!(runner.args, vec!["test".to_string(), "./...".to_string()]);
     }
 
     #[test]
     fn detect_npm_when_package_json_has_test_script() {
         let dir = tempdir().unwrap();
-        write(
-            dir.path(),
-            "package.json",
-            r#"{"scripts":{"test":"jest"}}"#,
-        );
+        write(dir.path(), "package.json", r#"{"scripts":{"test":"jest"}}"#);
         let runner = detect(dir.path(), None).unwrap();
         assert_eq!(runner.kind, TestRunnerKind::Npm);
         assert_eq!(runner.program, "npm");
@@ -468,11 +465,7 @@ mod tests {
     #[test]
     fn detect_yarn_when_yarn_lock_present_but_no_pnpm() {
         let dir = tempdir().unwrap();
-        write(
-            dir.path(),
-            "package.json",
-            r#"{"scripts":{"test":"jest"}}"#,
-        );
+        write(dir.path(), "package.json", r#"{"scripts":{"test":"jest"}}"#);
         touch(dir.path(), "yarn.lock");
         let runner = detect(dir.path(), None).unwrap();
         assert_eq!(runner.kind, TestRunnerKind::Yarn);
@@ -519,11 +512,7 @@ mod tests {
     fn detect_priority_cargo_over_node() {
         let dir = tempdir().unwrap();
         touch(dir.path(), "Cargo.toml");
-        write(
-            dir.path(),
-            "package.json",
-            r#"{"scripts":{"test":"jest"}}"#,
-        );
+        write(dir.path(), "package.json", r#"{"scripts":{"test":"jest"}}"#);
         let runner = detect(dir.path(), None).unwrap();
         assert_eq!(runner.kind, TestRunnerKind::Cargo);
     }
@@ -639,11 +628,7 @@ mod tests {
         let outcome = runner.run(dir.path().join("test.log")).await.unwrap();
         assert!(!outcome.passed);
         // Last line ("line-N") must appear; an early line ("line-1") must not.
-        assert!(
-            outcome
-                .summary
-                .contains(&format!("line-{}", lines_to_emit))
-        );
+        assert!(outcome.summary.contains(&format!("line-{}", lines_to_emit)));
         assert!(
             !outcome.summary.contains("line-1\n"),
             "summary should not include the very first line"
@@ -682,10 +667,7 @@ mod tests {
             args: Vec::new(),
             workdir: dir.path().to_path_buf(),
         };
-        let err = runner
-            .run(dir.path().join("test.log"))
-            .await
-            .unwrap_err();
+        let err = runner.run(dir.path().join("test.log")).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("spawn"),
             "expected spawn failure, got: {err:#}"

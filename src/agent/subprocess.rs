@@ -73,9 +73,7 @@ pub async fn run_logged(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
-        .context("subprocess: spawning child process")?;
+    let mut child = cmd.spawn().context("subprocess: spawning child process")?;
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
 

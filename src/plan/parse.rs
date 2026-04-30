@@ -156,7 +156,10 @@ fn parse_frontmatter(raw: &str) -> Result<String, PlanParseError> {
             })?;
             current_phase = Some(s.to_string());
         } else {
-            warn!(key = key_str, "unknown frontmatter key — accepting, but ignoring");
+            warn!(
+                key = key_str,
+                "unknown frontmatter key — accepting, but ignoring"
+            );
         }
     }
 
@@ -180,12 +183,12 @@ fn split_phases(body: &str) -> Result<(String, Vec<Phase>), PlanParseError> {
         let line_no = idx + 1;
         let line_no_eol = line.strip_suffix('\n').unwrap_or(line);
         if let Some(rest) = line_no_eol.strip_prefix("# Phase ") {
-            let (id_str, title) = rest.split_once(": ").ok_or_else(|| {
-                PlanParseError::BadHeading {
-                    line: line_no,
-                    raw: line_no_eol.to_string(),
-                }
-            })?;
+            let (id_str, title) =
+                rest.split_once(": ")
+                    .ok_or_else(|| PlanParseError::BadHeading {
+                        line: line_no,
+                        raw: line_no_eol.to_string(),
+                    })?;
             let id = PhaseId::parse(id_str).map_err(|source| PlanParseError::BadHeadingId {
                 line: line_no,
                 source,

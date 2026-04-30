@@ -11,8 +11,8 @@ use crate::plan::PhaseId;
 
 mod parse;
 
-pub use parse::{parse, serialize, DeferredParseError};
 pub use crate::plan::{snapshot, verify_unchanged, Snapshot, SnapshotError};
+pub use parse::{parse, serialize, DeferredParseError};
 
 /// A single checkbox item under `## Deferred items`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
