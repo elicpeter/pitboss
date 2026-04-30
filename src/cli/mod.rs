@@ -15,6 +15,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 pub mod fold;
+pub mod grind;
 pub mod init;
 pub mod interview;
 pub mod plan;
@@ -121,6 +122,10 @@ pub enum Command {
     },
     /// Author and inspect grind prompt files (`ls`, `validate`, `new`).
     Prompts(prompts::PromptsArgs),
+    /// Rotate through grind prompts, dispatching one session per rotation
+    /// onto a per-run branch (sequential MVP; parallelism arrives in
+    /// phase 11).
+    Grind(grind::GrindArgs),
 }
 
 /// Dispatch a parsed CLI invocation.
@@ -143,5 +148,6 @@ pub async fn dispatch(cli: Cli) -> Result<()> {
             fold::run(std::env::current_dir()?, checkout_original).await
         }
         Command::Prompts(args) => prompts::run(std::env::current_dir()?, args),
+        Command::Grind(args) => grind::run(std::env::current_dir()?, args).await,
     }
 }

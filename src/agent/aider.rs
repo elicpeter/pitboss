@@ -234,6 +234,9 @@ impl AiderAgent {
     fn build_command(&self, req: &AgentRequest) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.current_dir(&req.workdir);
+        if !req.env.is_empty() {
+            cmd.envs(req.env.iter());
+        }
         // Unattended-friendly defaults: no TTY-only formatting, no streaming
         // chunks (we want whole lines), auto-confirm every prompt, suppress
         // first-run / version-check / model-warning interactivity. Anything a
@@ -394,6 +397,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             log_path,
             timeout,
+            env: std::collections::HashMap::new(),
         }
     }
 
@@ -583,6 +587,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let std_cmd = cmd.as_std();
@@ -633,6 +638,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let args: Vec<String> = cmd
@@ -655,6 +661,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             log_path: std::env::temp_dir().join("never.log"),
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let payload = build_message_payload(&req);
         assert!(payload.starts_with("you are a careful engineer\n\n"));
@@ -671,6 +678,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             log_path: std::env::temp_dir().join("never.log"),
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let payload = build_message_payload(&req);
         assert_eq!(payload, "just the user body");
@@ -723,6 +731,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(120),
+            env: std::collections::HashMap::new(),
         };
         let outcome = agent.run(req, tx, cancel).await.unwrap();
         assert!(

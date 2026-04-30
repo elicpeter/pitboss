@@ -13,6 +13,7 @@
 pub mod discovery;
 pub mod plan;
 pub mod prompt;
+pub mod run;
 pub mod run_dir;
 pub mod scheduler;
 pub mod templates;
@@ -27,6 +28,10 @@ pub use plan::{
 pub use prompt::{
     parse_prompt_file, PromptDoc, PromptMeta, PromptMetaValidationError, PromptParseError,
     PromptSource,
+};
+pub use run::{
+    compose_user_prompt, run_branch_name, standing_instruction_block, GrindRunOutcome,
+    GrindRunner, GrindShutdown, GrindStopReason,
 };
 pub use run_dir::{
     generate_run_id, render_sessions_md, RunDir, RunPaths, Scratchpad, SessionLog, SessionRecord,

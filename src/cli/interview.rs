@@ -61,6 +61,7 @@ pub async fn conduct<A: Agent>(
         workdir: workspace.to_path_buf(),
         log_path: workspace.join(".pitboss/logs/questioner.log"),
         timeout: QUESTIONER_TIMEOUT,
+        env: std::collections::HashMap::new(),
     };
 
     let raw = dispatch_questioner(agent, request)

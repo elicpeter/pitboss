@@ -47,6 +47,8 @@ pub enum MockOp {
         /// PR body passed in.
         body: String,
     },
+    /// `stash_push(message)` was called.
+    StashPush(String),
 }
 
 /// Record of a single commit in [`MockGit`]'s in-memory log.
@@ -271,6 +273,38 @@ impl Git for MockGit {
         let mut s = self.state.lock().unwrap();
         s.ops.push(MockOp::StagedDiff);
         Ok(s.staged_diff.clone())
+    }
+
+    async fn stash_push(&self, message: &str, exclude: &[&Path]) -> Result<bool> {
+        let exclude_paths: Vec<PathBuf> = exclude.iter().map(|p| p.to_path_buf()).collect();
+        let mut s = self.state.lock().unwrap();
+        s.ops.push(MockOp::StashPush(message.to_string()));
+        if s.working_tree.is_empty() && s.staged.is_empty() {
+            return Ok(false);
+        }
+        let exclude_set: std::collections::HashSet<PathBuf> = exclude_paths.into_iter().collect();
+        let mut moved = false;
+        let to_clear: Vec<PathBuf> = s
+            .working_tree
+            .iter()
+            .filter(|p| !is_excluded(p, &exclude_set))
+            .cloned()
+            .collect();
+        for p in to_clear {
+            s.working_tree.remove(&p);
+            moved = true;
+        }
+        let staged_clear: Vec<PathBuf> = s
+            .staged
+            .iter()
+            .filter(|p| !is_excluded(p, &exclude_set))
+            .cloned()
+            .collect();
+        for p in staged_clear {
+            s.staged.remove(&p);
+            moved = true;
+        }
+        Ok(moved)
     }
 
     async fn open_pr(&self, title: &str, body: &str) -> Result<String> {

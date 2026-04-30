@@ -93,6 +93,10 @@ pub enum SessionStatus {
     Timeout,
     /// User-driven abort (e.g., second Ctrl-C from phase 07).
     Aborted,
+    /// Agent left uncommitted leftovers in the working tree which pitboss
+    /// stashed into a labeled stash for morning triage. The work itself was
+    /// otherwise valid; the dirty status is a hint that triage is needed.
+    Dirty,
 }
 
 impl SessionStatus {
@@ -102,6 +106,7 @@ impl SessionStatus {
             SessionStatus::Error => "error",
             SessionStatus::Timeout => "timeout",
             SessionStatus::Aborted => "aborted",
+            SessionStatus::Dirty => "dirty",
         }
     }
 }

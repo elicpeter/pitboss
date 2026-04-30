@@ -141,6 +141,16 @@ pub trait Git: Send + Sync {
     /// empty string.
     async fn staged_diff(&self) -> Result<String>;
 
+    /// Stash any uncommitted changes (including untracked files) into a stash
+    /// labeled `message`, optionally restricting the stash to paths *outside*
+    /// `exclude` via `:!<path>` pathspecs. Returns `true` when something was
+    /// actually stashed, `false` when the working tree had nothing to capture.
+    /// Used by the grind runner to preserve an agent's leftover edits at
+    /// session end so they survive into a morning triage rather than being
+    /// discarded — while keeping pitboss's own bookkeeping under `.pitboss/`
+    /// out of the stash.
+    async fn stash_push(&self, message: &str, exclude: &[&Path]) -> Result<bool>;
+
     /// Open a pull request via `gh pr create` for the current branch.
     ///
     /// Returns the URL `gh` prints on stdout (e.g.,

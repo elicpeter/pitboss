@@ -433,6 +433,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             workdir: self.workspace.clone(),
             log_path,
             timeout: DEFAULT_AGENT_TIMEOUT,
+            env: std::collections::HashMap::new(),
         };
 
         match self
@@ -750,6 +751,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 workdir: self.workspace.clone(),
                 log_path,
                 timeout: DEFAULT_AGENT_TIMEOUT,
+                env: std::collections::HashMap::new(),
             };
 
             match self
@@ -849,6 +851,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             workdir: self.workspace.clone(),
             log_path,
             timeout: DEFAULT_AGENT_TIMEOUT,
+            env: std::collections::HashMap::new(),
         };
 
         match self

@@ -242,6 +242,61 @@ impl Git for ShellGit {
         Ok(out.stdout)
     }
 
+    async fn stash_push(&self, message: &str, exclude: &[&Path]) -> Result<bool> {
+        // Pre-flight: a clean tree means there is nothing to stash. `git stash
+        // push` on a clean tree exits 0 and prints "No local changes to save",
+        // but emitting that as `false` lets callers skip the noise.
+        if self.is_clean().await? {
+            return Ok(false);
+        }
+        // Same `:!<path>` exclusion machinery `stage_changes` uses so callers
+        // can keep paths like `.pitboss/` out of the stash. Skip excludes that
+        // are already covered by `.gitignore`.
+        let mut effective: Vec<&Path> = Vec::with_capacity(exclude.len());
+        for p in exclude {
+            if !self.path_is_ignored(p).await? {
+                effective.push(p);
+            }
+        }
+        let mut args: Vec<String> = vec![
+            "stash".into(),
+            "push".into(),
+            "--include-untracked".into(),
+            "-m".into(),
+            message.to_string(),
+            "--".into(),
+            ".".into(),
+        ];
+        for p in effective {
+            args.push(format!(":!{}", p.display()));
+        }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.run("stash_push", &arg_refs).await?;
+        if !out.success {
+            return Err(GitError::Command {
+                operation: "stash_push".into(),
+                exit: out.status,
+                stderr: out.stderr,
+            }
+            .into());
+        }
+        // The pathspec form can succeed but leave nothing stashed when the
+        // only dirty paths were excluded. Detect that by re-checking
+        // cleanliness against the same exclusion set: if we're still dirty,
+        // the residue is just the excluded paths and we report no stash.
+        if self.is_clean().await? {
+            // Working tree is fully clean now → something landed in the stash.
+            Ok(true)
+        } else {
+            // Still dirty: confirm by checking whether the stash list has a
+            // matching message. Cheaper than re-running pathspec logic.
+            let stashes = self
+                .run_succeed("stash_list", &["stash", "list"])
+                .await?;
+            Ok(stashes.stdout.contains(message))
+        }
+    }
+
     async fn open_pr(&self, title: &str, body: &str) -> Result<String> {
         // `gh` resolves the target repository from its working directory's git
         // remotes — there is no `-C` flag, so the workspace is passed via

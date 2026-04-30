@@ -27,6 +27,7 @@ pub mod dry_run;
 pub mod gemini;
 pub mod subprocess;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -95,6 +96,12 @@ pub struct AgentRequest {
     /// Hard wall-clock cap. If the agent is still running when this elapses
     /// the impl must terminate it and return [`StopReason::Timeout`].
     pub timeout: Duration,
+    /// Extra environment variables the agent must apply to any subprocess it
+    /// spawns. The grind runner uses this to surface `PITBOSS_RUN_ID`,
+    /// `PITBOSS_PROMPT_NAME`, `PITBOSS_SUMMARY_FILE`, `PITBOSS_SCRATCHPAD`,
+    /// and `PITBOSS_SESSION_SEQ` to the dispatched agent. The phased `play`
+    /// runner leaves this empty.
+    pub env: HashMap<String, String>,
 }
 
 /// Streaming events emitted while an agent runs.

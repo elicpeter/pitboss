@@ -167,6 +167,7 @@ pub async fn run_with_agent<A: Agent>(
             workdir: workspace.to_path_buf(),
             log_path,
             timeout: PLANNER_TIMEOUT,
+            env: std::collections::HashMap::new(),
         };
 
         let body = dispatch_planner(agent, request).await?;

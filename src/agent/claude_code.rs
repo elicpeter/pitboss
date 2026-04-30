@@ -257,6 +257,9 @@ impl ClaudeCodeAgent {
     fn build_command(&self, req: &AgentRequest) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.current_dir(&req.workdir);
+        if !req.env.is_empty() {
+            cmd.envs(req.env.iter());
+        }
         cmd.args(["--print", "--output-format", "stream-json", "--verbose"]);
         let model = self.model_override.as_deref().unwrap_or(&req.model);
         cmd.args(["--model", model]);
@@ -425,6 +428,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             log_path,
             timeout,
+            env: std::collections::HashMap::new(),
         }
     }
 
@@ -611,6 +615,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let std_cmd = cmd.as_std();
@@ -657,6 +662,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let args: Vec<String> = cmd
@@ -718,6 +724,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: dir.path().join("opus.log"),
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let opus_args: Vec<String> = agent
             .build_command(&opus_req)
@@ -740,6 +747,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: dir.path().join("sonnet.log"),
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let sonnet_args: Vec<String> = agent
             .build_command(&sonnet_req)
@@ -771,6 +779,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: dir.path().join("run.log"),
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let args: Vec<String> = agent
             .build_command(&req)
@@ -804,6 +813,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let args: Vec<String> = cmd
@@ -835,6 +845,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(120),
+            env: std::collections::HashMap::new(),
         };
         let outcome = agent.run(req, tx, cancel).await.unwrap();
         assert!(

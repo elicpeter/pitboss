@@ -270,6 +270,9 @@ impl GeminiAgent {
     fn build_command(&self, req: &AgentRequest) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.current_dir(&req.workdir);
+        if !req.env.is_empty() {
+            cmd.envs(req.env.iter());
+        }
         // Unattended-friendly defaults: auto-approve every tool call, emit a
         // structured JSON document instead of ANSI-decorated text. Anything a
         // workspace needs to flip can be supplied via [`Self::with_extra_args`].
@@ -461,6 +464,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             log_path,
             timeout,
+            env: std::collections::HashMap::new(),
         }
     }
 
@@ -690,6 +694,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let std_cmd = cmd.as_std();
@@ -737,6 +742,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let args: Vec<String> = cmd
@@ -759,6 +765,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             log_path: std::env::temp_dir().join("never.log"),
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let payload = build_prompt_payload(&req);
         assert!(payload.starts_with("you are a careful engineer\n\n"));
@@ -775,6 +782,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             log_path: std::env::temp_dir().join("never.log"),
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let payload = build_prompt_payload(&req);
         assert_eq!(payload, "just the user body");
@@ -858,6 +866,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(120),
+            env: std::collections::HashMap::new(),
         };
         let outcome = agent.run(req, tx, cancel).await.unwrap();
         assert!(
