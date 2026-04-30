@@ -145,13 +145,22 @@ impl TerminalGuard {
     fn setup() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+            let _ = disable_raw_mode();
+            return Err(e.into());
+        }
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-        Ok(Self {
-            terminal,
-            active: true,
-        })
+        match Terminal::new(backend) {
+            Ok(terminal) => Ok(Self {
+                terminal,
+                active: true,
+            }),
+            Err(e) => {
+                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                let _ = disable_raw_mode();
+                Err(e.into())
+            }
+        }
     }
 
     fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
@@ -162,7 +171,6 @@ impl TerminalGuard {
         if !self.active {
             return Ok(());
         }
-        self.active = false;
         disable_raw_mode()?;
         execute!(
             self.terminal.backend_mut(),
@@ -170,6 +178,7 @@ impl TerminalGuard {
             DisableMouseCapture
         )?;
         self.terminal.show_cursor()?;
+        self.active = false;
         Ok(())
     }
 }

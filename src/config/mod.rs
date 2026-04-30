@@ -259,11 +259,10 @@ pub struct TestsConfig {
 /// error if the value is unknown. `None` means "use the default backend"
 /// (today, Claude Code).
 ///
-/// The four sub-tables (`claude_code`, `codex`, `aider`, `gemini`) carry
-/// the same shape — `binary`, `extra_args`, `model` — so a follow-up phase
-/// can wire each adapter without reshaping config. Today only the
-/// `claude_code` arm is consumed; the others parse but are otherwise
-/// inert until their backends ship.
+/// The four sub-tables (`claude_code`, `codex`, `aider`, `gemini`) all share
+/// the same shape (`binary`, `extra_args`, `model`), and all four are active:
+/// [`crate::agent::build_agent`] reads whichever sub-table matches the selected
+/// backend and forwards its overrides to the constructed agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {

@@ -1,12 +1,12 @@
-//! Backend selection — which underlying agent CLI pitboss should drive.
+//! Backend selection: which underlying agent CLI pitboss should drive.
 //!
-//! Phase 19 lays the groundwork for plugging in additional coding-agent CLIs
-//! (Codex, Aider, Gemini) without expanding the [`super::Agent`] trait surface
-//! or touching the runner. The enum is the in-memory form of the
-//! `agent.backend` key in `pitboss.toml`; today only [`BackendKind::ClaudeCode`]
-//! is wired through [`super::build_agent`], the others return a clear
-//! "not yet implemented" error so the dispatch path is in place for the
-//! follow-on phases that ship the real adapters.
+//! The enum is the in-memory form of the `agent.backend` key in
+//! `pitboss.toml`. All four variants are wired through [`super::build_agent`]
+//! as concrete adapters: [`BackendKind::ClaudeCode`] is the default, and
+//! [`BackendKind::Codex`], [`BackendKind::Aider`], and [`BackendKind::Gemini`]
+//! cover the other supported coding-agent CLIs. Per-backend overrides
+//! (binary path, extra args, model) live in the matching
+//! `[agent.<backend>]` sub-table.
 //!
 //! Parsing is case-insensitive and accepts the canonical underscored form as
 //! well as a hyphen-and-no-separator variant of `claude_code`, since users
@@ -25,14 +25,14 @@ use anyhow::anyhow;
 /// no `[agent]` section keeps today's behavior.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendKind {
-    /// Anthropic's `claude` CLI (the only backend currently wired).
+    /// Anthropic's `claude` CLI. Default when `[agent] backend` is unset.
     #[default]
     ClaudeCode,
-    /// OpenAI's `codex` CLI — not yet implemented.
+    /// OpenAI's `codex` CLI.
     Codex,
-    /// Aider — not yet implemented.
+    /// The `aider` CLI.
     Aider,
-    /// Google's `gemini` CLI — not yet implemented.
+    /// Google's `gemini` CLI.
     Gemini,
 }
 

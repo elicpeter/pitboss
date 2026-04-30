@@ -197,9 +197,10 @@ impl<A: Agent + ?Sized> Agent for Box<A> {
 /// A missing or absent `backend` falls back to [`backend::BackendKind::default`]
 /// (Claude Code) so workspaces without an `[agent]` section keep today's
 /// behavior. Unknown backend strings surface a parse error from
-/// [`backend::BackendKind`]'s [`std::str::FromStr`] impl. Backends other than `claude_code` return a
-/// clear "not yet implemented" error pending their adapter phases — the
-/// dispatch path is in place so wiring those up is a single match arm.
+/// [`backend::BackendKind`]'s [`std::str::FromStr`] impl. Each known backend
+/// (`claude_code`, `codex`, `aider`, `gemini`) builds its own adapter, with
+/// the matching `[agent.<backend>]` sub-table feeding binary path, extra
+/// arguments, and model overrides into the constructor.
 pub fn build_agent(cfg: &crate::config::Config) -> Result<Box<dyn Agent + Send + Sync>> {
     let kind = match cfg.agent.backend.as_deref() {
         None => backend::BackendKind::default(),

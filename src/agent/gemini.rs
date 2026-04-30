@@ -352,9 +352,9 @@ fn extract_tool_calls(value: &Value) -> Vec<String> {
         None => return Vec::new(),
     };
     let mut out = Vec::with_capacity(by_name.len());
-    // Iterate by insertion order (serde_json::Map preserves it when the
-    // `preserve_order` feature isn't on, BTreeMap order otherwise — either way
-    // is stable across runs of the same input, which is what tests need).
+    // Iterate in key-sorted (BTreeMap) order; serde_json::Map is a BTreeMap by
+    // default and only preserves insertion order when the `preserve_order`
+    // feature is enabled — either way the order is stable across runs.
     for (name, entry) in by_name {
         let count = entry
             .get("count")

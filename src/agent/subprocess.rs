@@ -100,12 +100,12 @@ pub async fn run_logged_with_stdin(
     let mut child = cmd.spawn().context("subprocess: spawning child process")?;
     if let Some(bytes) = stdin_payload {
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&bytes)
-                .await
-                .context("subprocess: writing stdin payload")?;
-            // Closing stdin signals EOF so the child can finish reading.
-            // Errors here (e.g. the child already exited) are non-fatal.
+            // Best-effort write + close. If the child exits before draining
+            // stdin (EPIPE) we must still produce a normal SubprocessOutcome
+            // so callers see the real exit code and captured stderr — those
+            // are the signal that explains *why* the child rejected input.
+            // Surfacing the write error here would shadow that diagnosis.
+            let _ = stdin.write_all(&bytes).await;
             let _ = stdin.shutdown().await;
         }
     }
@@ -343,6 +343,33 @@ mod tests {
             stdout,
             vec!["first line".to_string(), "second line".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn child_exiting_before_draining_stdin_is_non_fatal() {
+        // Child exits immediately without reading stdin. With a payload
+        // larger than the pipe buffer, the parent's write_all will hit
+        // EPIPE — the helper must still report the natural exit code
+        // rather than masking it with a setup-style error.
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("exit 3");
+        let (tx, _rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let payload = vec![b'x'; 1024 * 1024];
+        let outcome = run_logged_with_stdin(
+            cmd,
+            &log,
+            tx,
+            cancel,
+            Duration::from_secs(5),
+            Some(payload),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.stop_reason, StopReason::Completed);
+        assert_eq!(outcome.exit_code, 3);
     }
 
     #[tokio::test]
