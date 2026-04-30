@@ -6,15 +6,19 @@
 //! runner until the plan completes or a phase halts.
 //!
 //! On a fresh run (state file is `null` or missing) this command derives a new
-//! `run_id` and per-run branch from the current UTC timestamp and creates the
-//! branch in git. On a continuation (state present) the existing branch is
-//! checked out instead. Phase 17 layers `foreman resume` on top of the same
-//! state file.
+//! `run_id` and per-run branch from the current UTC timestamp, captures the
+//! current branch as `original_branch` for `foreman abort --checkout-original`,
+//! and creates the branch in git. On a continuation (state present) the
+//! existing branch is checked out instead. Phase 17's `foreman resume` reuses
+//! [`execute`] with [`StartMode::Resume`] to require an existing state file.
+//!
+//! Aborted runs (`state.aborted == true`) are refused — the user must clear
+//! `.foreman/state.json` to start a new run.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use tokio::task::JoinHandle;
 
@@ -24,14 +28,33 @@ use crate::deferred::{self, DeferredDoc};
 use crate::git::{Git, ShellGit};
 use crate::plan::{self, Plan};
 use crate::runner::{self, RunSummary, Runner};
-use crate::state::{self, RunState};
+use crate::state;
 use crate::tui;
+
+/// Whether [`execute`] is allowed to start a fresh run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartMode {
+    /// `foreman run`: a missing or `null` state file kicks off a fresh run.
+    Fresh,
+    /// `foreman resume`: a missing state file is an error.
+    Resume,
+}
 
 /// Top-level entry point for the `run` subcommand.
 ///
 /// `tui` toggles between the plain stderr logger (default) and the
 /// `ratatui` dashboard.
 pub async fn run(workspace: PathBuf, tui: bool) -> Result<()> {
+    execute(workspace, tui, StartMode::Fresh).await
+}
+
+/// Shared runner driver used by both `foreman run` and `foreman resume`.
+///
+/// `mode` selects fresh-start vs. resume semantics. The function loads config,
+/// the plan, and the deferred doc; reconciles state with `mode`; ensures the
+/// per-run branch is checked out; spawns the configured event subscriber
+/// (logger or TUI); then drives [`Runner::run`] to completion or halt.
+pub async fn execute(workspace: PathBuf, tui: bool, mode: StartMode) -> Result<()> {
     let config = config::load(&workspace)
         .with_context(|| format!("run: loading config in {:?}", workspace))?;
     let plan = load_plan(&workspace)?;
@@ -39,13 +62,32 @@ pub async fn run(workspace: PathBuf, tui: bool) -> Result<()> {
 
     let existing_state = state::load(&workspace)
         .with_context(|| format!("run: loading state in {:?}", workspace))?;
-    let is_fresh_run = existing_state.is_none();
-    let state = match existing_state {
-        Some(s) => s,
-        None => runner::fresh_run_state(&plan, &config, Utc::now()),
-    };
 
     let git = ShellGit::new(workspace.clone());
+
+    let (state, is_fresh_run) = match (existing_state, mode) {
+        (Some(s), _) => {
+            if s.aborted {
+                bail!(
+                    "state.json marks run {} as aborted; remove .foreman/state.json to start over",
+                    s.run_id
+                );
+            }
+            (s, false)
+        }
+        (None, StartMode::Fresh) => {
+            let original_branch = git.current_branch().await.ok();
+            let mut s = runner::fresh_run_state(&plan, &config, Utc::now());
+            s.original_branch = original_branch;
+            (s, true)
+        }
+        (None, StartMode::Resume) => {
+            bail!(
+                "no run to resume: .foreman/state.json is empty; use `foreman run` to start a fresh run"
+            );
+        }
+    };
+
     if is_fresh_run {
         git.create_branch(&state.branch).await.with_context(|| {
             format!(
@@ -109,10 +151,4 @@ where
 {
     let rx = runner.subscribe();
     tokio::spawn(runner::log_events(rx))
-}
-
-#[allow(dead_code)]
-fn _ensure_state_consumed(_: &RunState) {
-    // Compile-time anchor for `RunState`'s presence in the public surface; the
-    // CLI does not currently mutate the state outside the runner.
 }

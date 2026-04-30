@@ -91,6 +91,13 @@ pub struct RunState {
     pub run_id: String,
     /// Git branch the runner is committing to.
     pub branch: String,
+    /// Branch that was checked out before the run started, captured by
+    /// `foreman run` on the fresh-run path so `foreman abort
+    /// --checkout-original` can restore it. `None` when the run was started
+    /// before this field existed (older state files) or when the original
+    /// branch could not be resolved (detached HEAD).
+    #[serde(default)]
+    pub original_branch: Option<String>,
     /// When the run was first started.
     pub started_at: DateTime<Utc>,
     /// The `current_phase` at the moment the run began.
@@ -101,6 +108,12 @@ pub struct RunState {
     pub attempts: HashMap<PhaseId, u32>,
     /// Aggregated token usage so far.
     pub token_usage: TokenUsage,
+    /// `true` once the run has been explicitly aborted via `foreman abort`.
+    /// `foreman run` and `foreman resume` refuse to act on an aborted run; the
+    /// user must clear `.foreman/state.json` (e.g., re-run `foreman init` after
+    /// removing it) to start over.
+    #[serde(default)]
+    pub aborted: bool,
 }
 
 impl RunState {
@@ -113,11 +126,13 @@ impl RunState {
         Self {
             run_id: run_id.into(),
             branch: branch.into(),
+            original_branch: None,
             started_at: Utc::now(),
             started_phase,
             completed: Vec::new(),
             attempts: HashMap::new(),
             token_usage: TokenUsage::default(),
+            aborted: false,
         }
     }
 }
@@ -155,6 +170,7 @@ mod tests {
         let state = RunState {
             run_id: "20260429T143022Z".into(),
             branch: "foreman/run-20260429T143022Z".into(),
+            original_branch: Some("main".into()),
             started_at: DateTime::parse_from_rfc3339("2026-04-29T14:30:22Z")
                 .unwrap()
                 .with_timezone(&Utc),
@@ -166,11 +182,31 @@ mod tests {
                 output: 617,
                 by_role,
             },
+            aborted: false,
         };
 
         let json = serde_json::to_string(&state).unwrap();
         let back: RunState = serde_json::from_str(&json).unwrap();
         assert_eq!(state, back);
+    }
+
+    #[test]
+    fn deserializes_legacy_state_without_new_fields() {
+        // Older state.json files predate `original_branch` and `aborted`.
+        // Both must default cleanly so a workspace started under an earlier
+        // foreman build resumes under this one without manual surgery.
+        let legacy = serde_json::json!({
+            "run_id": "rid",
+            "branch": "br",
+            "started_at": "2026-04-29T14:30:22Z",
+            "started_phase": "01",
+            "completed": [],
+            "attempts": {},
+            "token_usage": {"input": 0, "output": 0, "by_role": {}}
+        });
+        let state: RunState = serde_json::from_value(legacy).unwrap();
+        assert_eq!(state.original_branch, None);
+        assert!(!state.aborted);
     }
 
     #[test]
