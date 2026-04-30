@@ -1,3 +1,183 @@
 //! Git integration via a trait + shell-out implementation.
 //!
-//! Filled in in phase 9.
+//! The runner uses [`Git`] for every git operation it performs: checking the
+//! working tree, creating and switching branches, staging the per-phase set of
+//! changes, committing, and reading diff stats. Two implementations ship:
+//!
+//! - [`ShellGit`] shells out to the local `git` CLI. Production default.
+//! - [`MockGit`] is an in-memory stub used by runner tests; it records every
+//!   call and lets tests assert that the runner is passing the right exclusion
+//!   set on `stage_changes`.
+//!
+//! The trait surface is intentionally narrow: foreman never resolves merges,
+//! talks to remotes, or rewrites history — it only lands per-phase commits
+//! onto a fresh per-run branch. Adding scope here later means adding methods,
+//! never reshaping the existing ones.
+
+pub mod mock;
+pub mod shell;
+
+use std::path::Path;
+
+use anyhow::Result;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use thiserror::Error;
+
+use crate::plan::PhaseId;
+
+pub use mock::{MockGit, MockOp};
+pub use shell::ShellGit;
+
+/// A git commit hash (full SHA-1 hex from `git rev-parse HEAD`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CommitId(String);
+
+impl CommitId {
+    /// Wrap a hash string. The value is not validated; trust the source.
+    pub fn new(hash: impl Into<String>) -> Self {
+        Self(hash.into())
+    }
+
+    /// Borrow the underlying hash string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CommitId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Summary of changes between two refs as reported by `git diff --shortstat`.
+/// Zero-valued when the range is empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffStat {
+    /// Number of files changed in the range.
+    pub files_changed: u64,
+    /// Total lines inserted across the range.
+    pub insertions: u64,
+    /// Total lines deleted across the range.
+    pub deletions: u64,
+}
+
+/// Errors that originate inside the git layer. Most callers carry an
+/// `anyhow::Result`; the typed enum exists so the runner can distinguish, for
+/// example, "command failed" from "output was unparseable".
+#[derive(Debug, Error)]
+pub enum GitError {
+    /// A `git` invocation exited with a non-success status.
+    #[error("git {operation} failed (exit {exit:?}): {stderr}")]
+    Command {
+        /// Short identifier of the operation (e.g., `"status"`, `"commit"`).
+        operation: String,
+        /// Process exit code, when known.
+        exit: Option<i32>,
+        /// Captured stderr — short enough to surface verbatim in error chains.
+        stderr: String,
+    },
+    /// A `git` invocation succeeded but produced output we couldn't parse.
+    #[error("git {operation}: unexpected output: {output}")]
+    UnexpectedOutput {
+        /// Operation name, mirroring [`GitError::Command::operation`].
+        operation: String,
+        /// The unparseable output, trimmed.
+        output: String,
+    },
+}
+
+/// Narrow git surface used by the runner.
+///
+/// All methods take `&self`; impls handle their own interior synchronization
+/// so the runner can hand the same `Git` to multiple roles in sequence.
+#[async_trait]
+pub trait Git: Send + Sync {
+    /// `true` when the working tree has no untracked or modified paths.
+    async fn is_clean(&self) -> Result<bool>;
+
+    /// Currently checked-out branch. Errors if HEAD is detached or unborn.
+    async fn current_branch(&self) -> Result<String>;
+
+    /// Create `name` pointing at the current HEAD. Does not switch to it.
+    async fn create_branch(&self, name: &str) -> Result<()>;
+
+    /// Switch HEAD to `name`. Fails if the working tree has incompatible
+    /// changes.
+    async fn checkout(&self, name: &str) -> Result<()>;
+
+    /// Stage every untracked or modified path **except** those in `exclude`.
+    ///
+    /// Each excluded path becomes a `:!<path>` git pathspec, applied by git
+    /// itself rather than by foreman walking the tree. The runner always
+    /// passes `plan.md`, `deferred.md`, and `.foreman` so per-phase commits
+    /// stay scoped to code; the trait keeps the parameter generic so tests
+    /// can verify that contract.
+    async fn stage_changes(&self, exclude: &[&Path]) -> Result<()>;
+
+    /// `true` if the index differs from HEAD — i.e., a `commit` would produce
+    /// a non-empty commit. The runner consults this before committing so a
+    /// phase that only modified excluded paths produces no commit.
+    async fn has_staged_changes(&self) -> Result<bool>;
+
+    /// Commit the current index with `message` and return the resulting
+    /// commit's id. Fails if the index has no staged changes.
+    async fn commit(&self, message: &str) -> Result<CommitId>;
+
+    /// Summary of `git diff --shortstat <from>..<to>`. An empty range
+    /// resolves to [`DiffStat::default`].
+    async fn diff_stat(&self, from: &str, to: &str) -> Result<DiffStat>;
+}
+
+/// Build a per-run branch name from a prefix and a UTC timestamp.
+///
+/// The output is `<prefix>YYYYMMDDTHHMMSSZ`, so a prefix of `foreman/run-`
+/// yields `foreman/run-20260429T143022Z`. Format intentionally has no
+/// separators inside the timestamp so the resulting branch is git-safe (no
+/// colons, no slashes beyond the prefix the user chose).
+pub fn branch_name(prefix: &str, at: DateTime<Utc>) -> String {
+    format!("{}{}", prefix, at.format("%Y%m%dT%H%M%SZ"))
+}
+
+/// Build the per-phase commit subject. Format: `[foreman] phase <id>: <title>`.
+pub fn commit_message(phase_id: &PhaseId, title: &str) -> String {
+    format!("[foreman] phase {}: {}", phase_id, title)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pid(s: &str) -> PhaseId {
+        PhaseId::parse(s).unwrap()
+    }
+
+    #[test]
+    fn branch_name_formats_timestamp_compactly() {
+        let at = DateTime::parse_from_rfc3339("2026-04-29T14:30:22Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(branch_name("foreman/run-", at), "foreman/run-20260429T143022Z");
+        assert_eq!(branch_name("", at), "20260429T143022Z");
+    }
+
+    #[test]
+    fn commit_message_uses_canonical_format() {
+        assert_eq!(
+            commit_message(&pid("02"), "Domain types"),
+            "[foreman] phase 02: Domain types"
+        );
+        assert_eq!(
+            commit_message(&pid("10b"), "Followup"),
+            "[foreman] phase 10b: Followup"
+        );
+    }
+
+    #[test]
+    fn commit_id_round_trips_through_display() {
+        let id = CommitId::new("abc123");
+        assert_eq!(id.as_str(), "abc123");
+        assert_eq!(format!("{}", id), "abc123");
+    }
+}
