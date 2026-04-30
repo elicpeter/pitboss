@@ -24,6 +24,7 @@ pub mod backend;
 pub mod claude_code;
 pub mod codex;
 pub mod dry_run;
+pub mod gemini;
 pub mod subprocess;
 
 use std::path::PathBuf;
@@ -234,9 +235,20 @@ pub fn build_agent(cfg: &crate::config::Config) -> Result<Box<dyn Agent + Send +
             }
             Ok(Box::new(agent))
         }
-        backend::BackendKind::Gemini => Err(anyhow::anyhow!(
-            "backend 'gemini' is not yet implemented"
-        )),
+        backend::BackendKind::Gemini => {
+            let overrides = &cfg.agent.gemini;
+            let mut agent = match overrides.binary.as_ref() {
+                Some(path) => gemini::GeminiAgent::with_binary(path),
+                None => gemini::GeminiAgent::new(),
+            };
+            if !overrides.extra_args.is_empty() {
+                agent = agent.with_extra_args(overrides.extra_args.clone());
+            }
+            if let Some(model) = overrides.model.as_deref() {
+                agent = agent.with_model_override(model);
+            }
+            Ok(Box::new(agent))
+        }
     }
 }
 
@@ -288,30 +300,19 @@ mod tests {
     }
 
     #[test]
-    fn build_agent_returns_not_implemented_for_pending_backends() {
-        // Adapters that haven't shipped yet must surface a clear error rather
-        // than silently falling back to the default backend. `Box<dyn Agent>`
-        // doesn't impl Debug, so we can't use `unwrap_err` and instead match
-        // the Result explicitly. As each adapter lands its name moves out of
-        // this list (codex shipped in phase 02, aider in phase 03 — see
-        // `build_agent_dispatches_explicit_codex` /
-        // `build_agent_dispatches_explicit_aider` below). The list is kept as
-        // an iterable rather than a hard-coded scalar so the next adapter to
-        // land just deletes a string.
-        let pending = ["gemini"];
-        for name in pending {
+    fn build_agent_has_no_pending_backends() {
+        // Every named backend in [`backend::BackendKind`] must construct an
+        // adapter — pitboss shipped its full backend trio in phases 02–04
+        // (codex, aider, gemini) on top of the default claude_code. If a new
+        // backend is added to the enum without a matching factory arm this
+        // test fails and forces the wiring to land in the same change.
+        for name in ["claude_code", "codex", "aider", "gemini"] {
             let mut cfg = crate::config::Config::default();
             cfg.agent.backend = Some(name.to_string());
-            match build_agent(&cfg) {
-                Ok(_) => panic!("backend {name} must error until its adapter ships"),
-                Err(e) => {
-                    let msg = format!("{e:#}");
-                    assert!(
-                        msg.contains(name) && msg.contains("not yet implemented"),
-                        "expected a not-implemented error mentioning {name}, got: {msg}"
-                    );
-                }
-            }
+            assert!(
+                build_agent(&cfg).is_ok(),
+                "backend {name} must build a concrete agent"
+            );
         }
     }
 
@@ -339,6 +340,35 @@ mod tests {
         match build_agent(&cfg) {
             Ok(agent) => assert_eq!(agent.name(), "aider"),
             Err(e) => panic!("explicit aider must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_dispatches_explicit_gemini() {
+        // Phase 04 acceptance: setting `[agent] backend = "gemini"` must build
+        // the GeminiAgent adapter rather than the default Claude Code one or
+        // erroring out as a not-yet-implemented backend.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("gemini".to_string());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "gemini"),
+            Err(e) => panic!("explicit gemini must build: {e:#}"),
+        }
+    }
+
+    #[test]
+    fn build_agent_gemini_honors_overrides() {
+        // The `[agent.gemini]` table must reach the constructed agent so tests
+        // (and real installs in non-standard locations) can point at a stub
+        // script and apply per-backend `extra_args` / `model`.
+        let mut cfg = crate::config::Config::default();
+        cfg.agent.backend = Some("gemini".to_string());
+        cfg.agent.gemini.binary = Some(std::path::PathBuf::from("/tmp/fake-gemini"));
+        cfg.agent.gemini.extra_args = vec!["--include-directories".into(), "src".into()];
+        cfg.agent.gemini.model = Some("gemini-2.5-flash".into());
+        match build_agent(&cfg) {
+            Ok(agent) => assert_eq!(agent.name(), "gemini"),
+            Err(e) => panic!("gemini with overrides must build: {e:#}"),
         }
     }
 
