@@ -162,7 +162,7 @@ pub fn list_runs(repo_root: &Path) -> Vec<RunListing> {
             state,
         });
     }
-    out.sort_by(|a, b| b.state.last_updated_at.cmp(&a.state.last_updated_at));
+    out.sort_by_key(|b| std::cmp::Reverse(b.state.last_updated_at));
     out
 }
 

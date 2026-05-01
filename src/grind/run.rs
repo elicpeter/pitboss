@@ -21,7 +21,7 @@
 //!
 //! The runner is intentionally agnostic to the surface that signals a stop:
 //! it takes a [`GrindShutdown`] handle that carries an
-//! [`AtomicBool`](std::sync::atomic::AtomicBool) drain flag and a
+//! [`AtomicBool`] drain flag and a
 //! [`CancellationToken`] abort token. The CLI binds those to live `Ctrl-C`
 //! events; the integration tests flip them by hand.
 
@@ -153,7 +153,7 @@ pub enum GrindEvent {
     },
 }
 
-/// Which run-level budget tipped past [`BUDGET_WARN_FRACTION`]. Carries the
+/// Which run-level budget tipped past the 80% warn threshold. Carries the
 /// observed counter and the configured cap so the TUI can render the percent
 /// without re-deriving it.
 #[derive(Debug, Clone, Copy, PartialEq)]
