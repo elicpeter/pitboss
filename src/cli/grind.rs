@@ -26,8 +26,9 @@ use crate::config::{self, Config};
 use crate::git::{Git, ShellGit};
 use crate::grind::{
     default_plan_from_dir, discover_prompts, generate_run_id, load_plan, resolve_budgets,
-    run_branch_name, DiscoveryOptions, ExitCode, GrindPlan, GrindRunner, GrindShutdown,
-    GrindStopReason, PlanBudgets, PromptDoc, RunDir, SessionRecord, SessionStatus,
+    resolve_target, run_branch_name, validate_resume, DiscoveryOptions, ExitCode, GrindPlan,
+    GrindRunner, GrindShutdown, GrindStopReason, PlanBudgets, PromptDoc, ResumeError, RunDir,
+    RunListing, SessionRecord, SessionStatus,
 };
 use crate::style::{self, col};
 
@@ -70,6 +71,14 @@ pub struct GrindArgs {
     /// Overrides the corresponding `[grind.budgets]` / plan field.
     #[arg(long = "max-tokens", value_name = "N")]
     pub max_tokens: Option<u64>,
+    /// Resume a previous grind run instead of starting a new one. Without an
+    /// argument, picks the most-recent run whose persisted status is `Active`
+    /// or `Aborted`. With an argument, resumes the named run id (the
+    /// directory name under `.pitboss/grind/`). Refuses to resume when the
+    /// plan or prompt set has changed in a way that would invalidate the
+    /// scheduler.
+    #[arg(long = "resume", value_name = "RUN_ID", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
 }
 
 fn parse_rfc3339(s: &str) -> std::result::Result<DateTime<Utc>, String> {
@@ -121,6 +130,12 @@ pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
             return Ok(ExitCode::FailedToStart);
         }
     };
+
+    if let Some(target) = args.resume.as_deref() {
+        let requested = if target.is_empty() { None } else { Some(target) };
+        return execute_resume(workspace, config, plan, prompts, agent, &args, requested).await;
+    }
+
     execute(workspace, config, plan, prompts, agent, &args).await
 }
 
@@ -206,6 +221,135 @@ where
     );
 
     Ok(classify_outcome(&outcome.stop_reason, &outcome.sessions))
+}
+
+async fn execute_resume<A>(
+    workspace: PathBuf,
+    config: Config,
+    plan: GrindPlan,
+    prompts: Vec<PromptDoc>,
+    agent: A,
+    args: &GrindArgs,
+    requested: Option<&str>,
+) -> Result<ExitCode>
+where
+    A: Agent + 'static,
+{
+    let listing = match resolve_target(&workspace, requested) {
+        Ok(l) => l,
+        Err(e) => {
+            print_failed_to_start(&render_resume_error(&e));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+
+    let current_prompt_names: Vec<String> = plan.prompts.iter().map(|p| p.name.clone()).collect();
+    let listing = match validate_resume(listing, &plan.name, &current_prompt_names) {
+        Ok(l) => l,
+        Err(e) => {
+            print_failed_to_start(&render_resume_error(&e));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+
+    // Spec: "After-resume sanity: re-checkout the run branch; if working tree
+    // is dirty, halts with exit code 4." We check `is_clean` *before*
+    // checkout so a dirty tree we'd otherwise carry into the resumed branch
+    // is surfaced as the failure point.
+    let git = ShellGit::new(workspace.clone());
+    match git.is_clean().await {
+        Ok(true) => {}
+        Ok(false) => {
+            print_failed_to_start(&format!(
+                "resume {:?}: working tree is dirty; commit or stash changes before resuming",
+                listing.run_id
+            ));
+            return Ok(ExitCode::FailedToStart);
+        }
+        Err(e) => {
+            print_failed_to_start(&format!(
+                "resume {:?}: checking working tree: {e:#}",
+                listing.run_id
+            ));
+            return Ok(ExitCode::FailedToStart);
+        }
+    }
+    if let Err(e) = git.checkout(&listing.state.branch).await {
+        print_failed_to_start(&format!(
+            "resume {:?}: checking out {:?}: {e:#}",
+            listing.run_id, listing.state.branch
+        ));
+        return Ok(ExitCode::FailedToStart);
+    }
+
+    let run_dir = match RunDir::open(&workspace, &listing.run_id) {
+        Ok(d) => d,
+        Err(e) => {
+            print_failed_to_start(&format!(
+                "resume {:?}: opening run directory: {e:#}",
+                listing.run_id
+            ));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+
+    let cli_budgets = PlanBudgets {
+        max_iterations: args.max_iterations,
+        until: args.until,
+        max_tokens: args.max_tokens,
+        max_cost_usd: args.max_cost,
+    };
+    let budgets = resolve_budgets(&config.grind.budgets, &plan.budgets, &cli_budgets);
+    let consecutive_failure_limit = config.grind.consecutive_failure_limit;
+
+    let prompts_map = into_lookup(prompts);
+    let runner_git = ShellGit::new(workspace.clone());
+    let RunListing {
+        run_id,
+        state_path: _,
+        state,
+    } = listing;
+    let mut runner = GrindRunner::resume(
+        workspace.clone(),
+        config,
+        run_id.clone(),
+        state.branch.clone(),
+        plan,
+        prompts_map,
+        run_dir,
+        agent,
+        runner_git,
+        budgets,
+        consecutive_failure_limit,
+        state.scheduler_state,
+        state.budget_consumed,
+        state.last_session_seq,
+        state.started_at,
+    );
+
+    let shutdown = GrindShutdown::new();
+    let signal_task = spawn_signal_handler(shutdown.clone());
+
+    announce_resume(&run_id, &state.branch, state.last_session_seq);
+
+    let result = runner.run(shutdown.clone()).await;
+
+    signal_task.abort();
+    let _ = signal_task.await;
+
+    let outcome = result?;
+    announce_finish(
+        &outcome.run_id,
+        &outcome.branch,
+        &outcome.stop_reason,
+        outcome.sessions.len(),
+    );
+
+    Ok(classify_outcome(&outcome.stop_reason, &outcome.sessions))
+}
+
+fn render_resume_error(e: &ResumeError) -> String {
+    format!("resume: {e}")
 }
 
 /// Map a grind run's [`GrindStopReason`] plus its session list to the
@@ -316,6 +460,23 @@ fn announce_start(run_id: &str, branch: &str) {
         col(c, style::CYAN, branch),
     );
     info!(run_id, branch, "grind: run started");
+}
+
+fn announce_resume(run_id: &str, branch: &str, last_session_seq: u32) {
+    let c = style::use_color_stderr();
+    eprintln!(
+        "{} resuming grind run {} on branch {} (next session-{:04})",
+        col(c, style::BOLD_CYAN, "[pitboss]"),
+        col(c, style::BOLD_WHITE, run_id),
+        col(c, style::CYAN, branch),
+        last_session_seq.saturating_add(1),
+    );
+    info!(
+        run_id,
+        branch,
+        last_session_seq,
+        "grind: run resumed"
+    );
 }
 
 fn announce_drain() {

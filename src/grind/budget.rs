@@ -18,11 +18,29 @@
 //! the counter; aborts and dirty sessions leave it untouched.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use super::run_dir::{SessionRecord, SessionStatus};
 use crate::config::{Config, ModelPricing};
 
 use super::plan::PlanBudgets;
+
+/// Persisted snapshot of a [`BudgetTracker`]'s aggregated counters. Written
+/// into `state.json` so a resumed run picks up the same cumulative spend.
+/// Pure data — no clock, no policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct BudgetSnapshot {
+    /// Sessions dispatched so far.
+    pub iterations: u32,
+    /// Cumulative input tokens billed across every recorded session.
+    pub tokens_input: u64,
+    /// Cumulative output tokens billed across every recorded session.
+    pub tokens_output: u64,
+    /// Cumulative cost in USD.
+    pub cost_usd: f64,
+    /// Current run of consecutive failed sessions (`Error` / `Timeout`).
+    pub consecutive_failures: u32,
+}
 
 /// Documented exit codes for `pitboss grind`. Mapped to a process exit code
 /// via [`ExitCode::into_process`]. The numeric values are part of the
@@ -177,6 +195,36 @@ impl BudgetTracker {
             tokens_output: 0,
             cost_usd: 0.0,
             consecutive_failures: 0,
+        }
+    }
+
+    /// Build a tracker pre-loaded with a previously persisted [`BudgetSnapshot`].
+    /// Used by `pitboss grind --resume` to keep cumulative counters aligned
+    /// with sessions that landed before the kill.
+    pub fn from_snapshot(
+        budgets: PlanBudgets,
+        consecutive_failure_limit: u32,
+        snapshot: BudgetSnapshot,
+    ) -> Self {
+        Self {
+            budgets,
+            consecutive_failure_limit,
+            iterations: snapshot.iterations,
+            tokens_input: snapshot.tokens_input,
+            tokens_output: snapshot.tokens_output,
+            cost_usd: snapshot.cost_usd,
+            consecutive_failures: snapshot.consecutive_failures,
+        }
+    }
+
+    /// Capture the tracker's aggregated counters into a [`BudgetSnapshot`].
+    pub fn snapshot(&self) -> BudgetSnapshot {
+        BudgetSnapshot {
+            iterations: self.iterations,
+            tokens_input: self.tokens_input,
+            tokens_output: self.tokens_output,
+            cost_usd: self.cost_usd,
+            consecutive_failures: self.consecutive_failures,
         }
     }
 

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -37,7 +37,8 @@ use super::budget::{session_cost_usd, BudgetCheck, BudgetReason, BudgetTracker};
 use super::plan::{GrindPlan, PlanBudgets};
 use super::prompt::PromptDoc;
 use super::run_dir::{RunDir, SessionRecord, SessionStatus};
-use super::scheduler::Scheduler;
+use super::scheduler::{Scheduler, SchedulerState};
+use super::state::{build_state, RunStatus};
 
 /// Raw markdown standing-instruction block prepended to every grind prompt.
 /// Embedded at compile time so users do not have to author it themselves and
@@ -171,6 +172,8 @@ pub struct GrindRunner<A: Agent, G: Git> {
     next_seq: u32,
     budgets: PlanBudgets,
     consecutive_failure_limit: u32,
+    started_at: DateTime<Utc>,
+    initial_budget: super::budget::BudgetSnapshot,
 }
 
 impl<A: Agent, G: Git> GrindRunner<A, G> {
@@ -212,6 +215,54 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             next_seq: 1,
             budgets,
             consecutive_failure_limit,
+            started_at: Utc::now(),
+            initial_budget: super::budget::BudgetSnapshot::default(),
+        }
+    }
+
+    /// Build a runner from a previously persisted resume state. The caller
+    /// has already validated the prompt set, opened the existing run
+    /// directory, and re-checked out the run branch.
+    ///
+    /// `scheduler_state` is fed straight into [`Scheduler::with_state`] so
+    /// the next [`Scheduler::next`] call deterministically returns the same
+    /// prompt the original loop would have. `initial_budget` seeds the
+    /// in-memory [`BudgetTracker`] so cumulative caps stay accurate across
+    /// the resume boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume(
+        workspace: PathBuf,
+        config: Config,
+        run_id: String,
+        branch: String,
+        plan: GrindPlan,
+        prompts: BTreeMap<String, PromptDoc>,
+        run_dir: RunDir,
+        agent: A,
+        git: G,
+        budgets: PlanBudgets,
+        consecutive_failure_limit: u32,
+        scheduler_state: SchedulerState,
+        initial_budget: super::budget::BudgetSnapshot,
+        last_session_seq: u32,
+        started_at: DateTime<Utc>,
+    ) -> Self {
+        let scheduler = Scheduler::with_state(plan.clone(), prompts, scheduler_state);
+        Self {
+            workspace,
+            config,
+            run_id,
+            branch,
+            plan,
+            scheduler,
+            run_dir,
+            agent,
+            git,
+            next_seq: last_session_seq.saturating_add(1),
+            budgets,
+            consecutive_failure_limit,
+            started_at,
+            initial_budget,
         }
     }
 
@@ -235,13 +286,34 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         &self.plan
     }
 
+    /// Wall-clock instant the run was originally started. Resumed runs
+    /// inherit the original start; fresh runs use the construction time.
+    pub fn started_at(&self) -> DateTime<Utc> {
+        self.started_at
+    }
+
     /// Drive the loop. Returns once the scheduler exhausts, drain trips,
     /// abort trips, a run-level budget exhausts, or the consecutive-failure
     /// limit is reached.
     pub async fn run(&mut self, shutdown: GrindShutdown) -> Result<GrindRunOutcome> {
         let mut sessions: Vec<SessionRecord> = Vec::new();
-        let mut tracker = BudgetTracker::new(self.budgets.clone(), self.consecutive_failure_limit);
+        let mut tracker = BudgetTracker::from_snapshot(
+            self.budgets.clone(),
+            self.consecutive_failure_limit,
+            self.initial_budget,
+        );
         let mut stop_reason = GrindStopReason::Completed;
+        // Stamp the initial state.json so a resume target exists from the
+        // first moment a run is on disk, even if the host process dies before
+        // a single session lands.
+        if let Err(e) = self.write_state(&tracker, self.next_seq.saturating_sub(1), RunStatus::Active)
+        {
+            warn!(
+                run_id = %self.run_id,
+                error = %format!("{e:#}"),
+                "grind: initial state.json write failed"
+            );
+        }
 
         loop {
             if shutdown.is_draining() {
@@ -287,6 +359,21 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
                 .with_context(|| format!("grind: appending session {seq} record to log"))?;
             tracker.record_session(&record);
             sessions.push(record.clone());
+            // Persist resume state right after the session record lands. The
+            // session log is the source of truth; state.json is a derived
+            // cache, so writing it second keeps the two consistent under
+            // crash: if the process dies between the log append and this
+            // write, resume will replay the last persisted scheduler state
+            // (which is one session behind sessions.jsonl) — the next
+            // dispatch will be the prompt we were already going to pick.
+            if let Err(e) = self.write_state(&tracker, seq, RunStatus::Active) {
+                warn!(
+                    run_id = %self.run_id,
+                    seq,
+                    error = %format!("{e:#}"),
+                    "grind: state.json write failed"
+                );
+            }
 
             if record.status == SessionStatus::Aborted {
                 stop_reason = GrindStopReason::Aborted;
@@ -316,12 +403,56 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             }
         }
 
+        // Stamp the terminal state.json so resume callers can tell at a
+        // glance whether a run is still live. Use the seq of the last
+        // recorded session (or 0 when none ran).
+        let terminal_seq = sessions.last().map(|r| r.seq).unwrap_or(0);
+        let terminal_status = match &stop_reason {
+            GrindStopReason::Completed => RunStatus::Completed,
+            GrindStopReason::Drained | GrindStopReason::Aborted => RunStatus::Aborted,
+            GrindStopReason::BudgetExhausted(_)
+            | GrindStopReason::ConsecutiveFailureLimit { .. } => RunStatus::Failed,
+        };
+        if let Err(e) = self.write_state(&tracker, terminal_seq, terminal_status) {
+            warn!(
+                run_id = %self.run_id,
+                error = %format!("{e:#}"),
+                "grind: terminal state.json write failed"
+            );
+        }
+
         Ok(GrindRunOutcome {
             run_id: self.run_id.clone(),
             branch: self.branch.clone(),
             sessions,
             stop_reason,
         })
+    }
+
+    fn write_state(
+        &self,
+        tracker: &BudgetTracker,
+        last_session_seq: u32,
+        status: RunStatus,
+    ) -> Result<()> {
+        let prompt_names: Vec<String> = self
+            .plan
+            .prompts
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        let state = build_state(
+            self.run_id.clone(),
+            self.branch.clone(),
+            self.plan.name.clone(),
+            prompt_names,
+            self.scheduler.state().clone(),
+            tracker.snapshot(),
+            last_session_seq,
+            self.started_at,
+            status,
+        );
+        state.write(self.run_dir.paths())
     }
 
     async fn run_session(
