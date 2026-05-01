@@ -11,9 +11,13 @@
 //! stream-json --verbose --model haiku` from a shell — pitboss invokes the
 //! binary with the same flag set.
 //!
-//! Pitboss runs the agent under `--permission-mode auto` for safe unattended
-//! orchestration. If you want a different mode, construct the agent with
-//! [`ClaudeCodeAgent::with_permission_mode`].
+//! Pitboss picks the `--permission-mode` flag per dispatch based on the model:
+//! Opus gets `auto` (Anthropic's Auto Mode is Opus-only; Sonnet/Haiku see the
+//! flag as `default` and gate every Edit/Write), other models get
+//! `acceptEdits` so headless runs can still apply file edits without a human
+//! to answer the prompt. To force a specific mode regardless of model,
+//! construct the agent with [`ClaudeCodeAgent::with_permission_mode`] or set
+//! `[agent.claude_code] permission_mode` in `config.toml`.
 //!
 //! ## Event mapping
 //!
@@ -62,7 +66,7 @@ const ERROR_TAIL_LINES: usize = 8;
 #[derive(Debug, Clone)]
 pub struct ClaudeCodeAgent {
     binary: PathBuf,
-    permission_mode: String,
+    permission_mode: Option<String>,
     extra_args: Vec<String>,
     model_override: Option<String>,
 }
@@ -72,7 +76,7 @@ impl ClaudeCodeAgent {
     pub fn new() -> Self {
         Self {
             binary: PathBuf::from(DEFAULT_BINARY),
-            permission_mode: "auto".to_string(),
+            permission_mode: None,
             extra_args: Vec::new(),
             model_override: None,
         }
@@ -84,23 +88,25 @@ impl ClaudeCodeAgent {
     pub fn with_binary(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: binary.into(),
-            permission_mode: "auto".to_string(),
+            permission_mode: None,
             extra_args: Vec::new(),
             model_override: None,
         }
     }
 
-    /// Override the `--permission-mode` flag passed to `claude`. The default
-    /// is `auto`; other valid values are `acceptEdits`, `bypassPermissions`,
-    /// `default`, `dontAsk`, `plan`.
+    /// Pin the `--permission-mode` flag for every dispatch through this agent,
+    /// bypassing the per-model default. Valid values are `auto`, `acceptEdits`,
+    /// `bypassPermissions`, `default`, `dontAsk`, `plan`. Without this call
+    /// (the common case), the mode is chosen at dispatch time by
+    /// [`resolve_permission_mode`] based on the resolved model.
     pub fn with_permission_mode(mut self, mode: impl Into<String>) -> Self {
-        self.permission_mode = mode.into();
+        self.permission_mode = Some(mode.into());
         self
     }
 
     /// Append extra argv that gets spliced in just before the positional `--`
     /// prompt sigil on every invocation. Mirrors `[agent.claude_code]
-    /// extra_args` in `pitboss.toml`.
+    /// extra_args` in `config.toml`.
     pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
         self.extra_args = args;
         self
@@ -226,14 +232,42 @@ impl Agent for ClaudeCodeAgent {
     }
 }
 
+/// Pick the `--permission-mode` flag for a given model when the user has
+/// not pinned one explicitly.
+///
+/// Anthropic's Auto Mode (the autonomous-execution permission grant the
+/// `auto` flag asks for) is currently Opus-only. Sonnet and Haiku accept
+/// `--permission-mode auto` without error but fall through to `default`
+/// behavior at runtime, which gates every Edit/Write/Bash on a prompt that
+/// nobody is around to answer in headless `--print` mode. To keep
+/// non-Opus dispatches actually able to do their job, we drop them to
+/// `acceptEdits` so file edits go through while Bash still requires an
+/// allowlist entry. Users who want Bash auto-accepted too can pin
+/// `bypassPermissions` via [`ClaudeCodeAgent::with_permission_mode`] or the
+/// `[agent.claude_code] permission_mode` config field.
+pub fn resolve_permission_mode(model: &str) -> &'static str {
+    if model.to_ascii_lowercase().contains("opus") {
+        "auto"
+    } else {
+        "acceptEdits"
+    }
+}
+
 impl ClaudeCodeAgent {
     fn build_command(&self, req: &AgentRequest) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.current_dir(&req.workdir);
+        if !req.env.is_empty() {
+            cmd.envs(req.env.iter());
+        }
         cmd.args(["--print", "--output-format", "stream-json", "--verbose"]);
         let model = self.model_override.as_deref().unwrap_or(&req.model);
         cmd.args(["--model", model]);
-        cmd.args(["--permission-mode", &self.permission_mode]);
+        let permission_mode = self
+            .permission_mode
+            .as_deref()
+            .unwrap_or_else(|| resolve_permission_mode(model));
+        cmd.args(["--permission-mode", permission_mode]);
         if !req.system_prompt.is_empty() {
             cmd.arg("--append-system-prompt").arg(&req.system_prompt);
         }
@@ -394,6 +428,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             log_path,
             timeout,
+            env: std::collections::HashMap::new(),
         }
     }
 
@@ -580,6 +615,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let std_cmd = cmd.as_std();
@@ -626,6 +662,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let args: Vec<String> = cmd
@@ -655,6 +692,114 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_permission_mode_picks_auto_for_opus_and_accept_edits_otherwise() {
+        // Anthropic's Auto Mode is Opus-only at the time of writing; non-Opus
+        // models silently fall back to default-mode prompting on `auto`,
+        // which deadlocks headless runs. The resolver has to map "any opus
+        // string" to auto and everything else to acceptEdits.
+        assert_eq!(resolve_permission_mode("claude-opus-4-7"), "auto");
+        assert_eq!(resolve_permission_mode("claude-opus-4-6"), "auto");
+        assert_eq!(resolve_permission_mode("opus"), "auto");
+        assert_eq!(resolve_permission_mode("CLAUDE-OPUS-4-7"), "auto");
+        assert_eq!(resolve_permission_mode("claude-sonnet-4-6"), "acceptEdits");
+        assert_eq!(resolve_permission_mode("claude-haiku-4-5"), "acceptEdits");
+        assert_eq!(resolve_permission_mode("gpt-5"), "acceptEdits");
+    }
+
+    #[tokio::test]
+    async fn build_command_picks_per_model_permission_mode_without_explicit_override() {
+        // The whole point of the per-model resolver: dispatching the same
+        // agent struct against an opus model and a sonnet model should
+        // produce different `--permission-mode` flags so non-Opus roles
+        // don't get stuck waiting for permission prompts.
+        let dir = tempfile::tempdir().unwrap();
+        let agent = ClaudeCodeAgent::with_binary("claude");
+
+        let opus_req = AgentRequest {
+            role: Role::Implementer,
+            model: "claude-opus-4-7".into(),
+            system_prompt: String::new(),
+            user_prompt: "u".into(),
+            workdir: dir.path().to_path_buf(),
+            log_path: dir.path().join("opus.log"),
+            timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
+        };
+        let opus_args: Vec<String> = agent
+            .build_command(&opus_req)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            opus_args
+                .windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "auto"),
+            "opus dispatch must default to auto: {opus_args:?}"
+        );
+
+        let sonnet_req = AgentRequest {
+            role: Role::Auditor,
+            model: "claude-sonnet-4-6".into(),
+            system_prompt: String::new(),
+            user_prompt: "u".into(),
+            workdir: dir.path().to_path_buf(),
+            log_path: dir.path().join("sonnet.log"),
+            timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
+        };
+        let sonnet_args: Vec<String> = agent
+            .build_command(&sonnet_req)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            sonnet_args
+                .windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "acceptEdits"),
+            "sonnet dispatch must default to acceptEdits: {sonnet_args:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_permission_mode_override_beats_per_model_default() {
+        // A user pinning `bypassPermissions` (or any other mode) via
+        // `with_permission_mode` or `[agent.claude_code] permission_mode`
+        // must win even when the resolved model is non-Opus.
+        let dir = tempfile::tempdir().unwrap();
+        let agent =
+            ClaudeCodeAgent::with_binary("claude").with_permission_mode("bypassPermissions");
+        let req = AgentRequest {
+            role: Role::Auditor,
+            model: "claude-sonnet-4-6".into(),
+            system_prompt: String::new(),
+            user_prompt: "u".into(),
+            workdir: dir.path().to_path_buf(),
+            log_path: dir.path().join("run.log"),
+            timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
+        };
+        let args: Vec<String> = agent
+            .build_command(&req)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"),
+            "explicit override must win: {args:?}"
+        );
+        assert!(
+            !args
+                .windows(2)
+                .any(|w| w[0] == "--permission-mode" && (w[1] == "auto" || w[1] == "acceptEdits")),
+            "per-model default must not also appear: {args:?}"
+        );
+    }
+
     #[tokio::test]
     async fn build_command_omits_append_system_prompt_when_empty() {
         let agent = ClaudeCodeAgent::with_binary("claude");
@@ -668,6 +813,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(1),
+            env: std::collections::HashMap::new(),
         };
         let cmd = agent.build_command(&req);
         let args: Vec<String> = cmd
@@ -699,6 +845,7 @@ mod tests {
             workdir: dir.path().to_path_buf(),
             log_path: log,
             timeout: Duration::from_secs(120),
+            env: std::collections::HashMap::new(),
         };
         let outcome = agent.run(req, tx, cancel).await.unwrap();
         assert!(

@@ -1,7 +1,7 @@
 //! Cross-backend dispatch integration test.
 //!
 //! Phase 04 acceptance: every backend named in [`pitboss::agent::backend::BackendKind`]
-//! must be reachable from a minimal `pitboss.toml` containing only an `[agent]`
+//! must be reachable from a minimal `config.toml` containing only an `[agent]`
 //! section. This file pins the factory dispatch path against the config schema
 //! so that an accidental enum-arm deletion, factory-arm regression, or config
 //! key rename in any of those layers fails one named test rather than slipping

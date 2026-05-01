@@ -242,6 +242,130 @@ impl Git for ShellGit {
         Ok(out.stdout)
     }
 
+    async fn stash_push(&self, message: &str, exclude: &[&Path]) -> Result<bool> {
+        // Pre-flight: a clean tree means there is nothing to stash. `git stash
+        // push` on a clean tree exits 0 and prints "No local changes to save",
+        // but emitting that as `false` lets callers skip the noise.
+        if self.is_clean().await? {
+            return Ok(false);
+        }
+        // Same `:!<path>` exclusion machinery `stage_changes` uses so callers
+        // can keep paths like `.pitboss/` out of the stash. Skip excludes that
+        // are already covered by `.gitignore`.
+        let mut effective: Vec<&Path> = Vec::with_capacity(exclude.len());
+        for p in exclude {
+            if !self.path_is_ignored(p).await? {
+                effective.push(p);
+            }
+        }
+        let mut args: Vec<String> = vec![
+            "stash".into(),
+            "push".into(),
+            "--include-untracked".into(),
+            "-m".into(),
+            message.to_string(),
+            "--".into(),
+            ".".into(),
+        ];
+        for p in effective {
+            args.push(format!(":!{}", p.display()));
+        }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = self.run("stash_push", &arg_refs).await?;
+        if !out.success {
+            return Err(GitError::Command {
+                operation: "stash_push".into(),
+                exit: out.status,
+                stderr: out.stderr,
+            }
+            .into());
+        }
+        // The pathspec form can succeed but leave nothing stashed when the
+        // only dirty paths were excluded. Detect that by re-checking
+        // cleanliness against the same exclusion set: if we're still dirty,
+        // the residue is just the excluded paths and we report no stash.
+        if self.is_clean().await? {
+            // Working tree is fully clean now → something landed in the stash.
+            Ok(true)
+        } else {
+            // Still dirty: confirm by checking whether the stash list has a
+            // matching message. Cheaper than re-running pathspec logic.
+            let stashes = self.run_succeed("stash_list", &["stash", "list"]).await?;
+            Ok(stashes.stdout.contains(message))
+        }
+    }
+
+    async fn add_worktree(&self, path: &Path, branch: &str, base_branch: &str) -> Result<()> {
+        let path_str = path.to_string_lossy();
+        self.run_succeed(
+            "worktree_add",
+            &["worktree", "add", "-b", branch, &path_str, base_branch],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_worktree(&self, path: &Path) -> Result<()> {
+        let path_str = path.to_string_lossy();
+        let out = self
+            .run(
+                "worktree_remove",
+                &["worktree", "remove", "--force", &path_str],
+            )
+            .await?;
+        if out.success {
+            return Ok(());
+        }
+        // Treat "not a working tree" as a soft success: the parent may have
+        // already moved the directory aside for forensics, in which case the
+        // bookkeeping cleanup is the only thing left to do.
+        let combined = format!("{}{}", out.stdout, out.stderr);
+        let lower = combined.to_ascii_lowercase();
+        if lower.contains("is not a working tree") || lower.contains("not a working tree") {
+            self.run("worktree_prune", &["worktree", "prune"]).await?;
+            return Ok(());
+        }
+        Err(GitError::Command {
+            operation: "worktree_remove".into(),
+            exit: out.status,
+            stderr: out.stderr,
+        }
+        .into())
+    }
+
+    async fn delete_branch(&self, branch: &str) -> Result<()> {
+        let out = self.run("delete_branch", &["branch", "-D", branch]).await?;
+        if out.success {
+            return Ok(());
+        }
+        let combined = format!("{}{}", out.stdout, out.stderr);
+        let lower = combined.to_ascii_lowercase();
+        if lower.contains("not found") {
+            return Ok(());
+        }
+        Err(GitError::Command {
+            operation: "delete_branch".into(),
+            exit: out.status,
+            stderr: out.stderr,
+        }
+        .into())
+    }
+
+    async fn merge_ff_only(&self, source_branch: &str) -> Result<()> {
+        let out = self
+            .run("merge_ff_only", &["merge", "--ff-only", source_branch])
+            .await?;
+        if out.success {
+            return Ok(());
+        }
+        Err(GitError::Command {
+            operation: "merge_ff_only".into(),
+            exit: out.status,
+            stderr: out.stderr,
+        }
+        .into())
+    }
+
     async fn open_pr(&self, title: &str, body: &str) -> Result<String> {
         // `gh` resolves the target repository from its working directory's git
         // remotes — there is no `-C` flag, so the workspace is passed via
@@ -405,19 +529,19 @@ mod tests {
         // Mirror the runner's per-phase situation: the agent left planning
         // artifacts and `.pitboss/` updates in the working tree alongside one
         // real source change. Only the source change should be staged.
-        fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
-        fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
-        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
-        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss/play")).unwrap();
+        fs::write(dir.path().join(".pitboss/play/plan.md"), "plan body\n").unwrap();
+        fs::write(
+            dir.path().join(".pitboss/play/deferred.md"),
+            "deferred body\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join(".pitboss/play/state.json"), "{}\n").unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
 
-        let plan_path = Path::new("plan.md");
-        let deferred_path = Path::new("deferred.md");
         let pitboss_path = Path::new(".pitboss");
-        git.stage_changes(&[plan_path, deferred_path, pitboss_path])
-            .await
-            .unwrap();
+        git.stage_changes(&[pitboss_path]).await.unwrap();
 
         // Inspect the index directly: only `src/foo.rs` should be there.
         let staged = std::process::Command::new("git")
@@ -441,18 +565,12 @@ mod tests {
         let git = ShellGit::new(dir.path());
 
         fs::write(dir.path().join(".gitignore"), ".pitboss/\n").unwrap();
-        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
-        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss/play")).unwrap();
+        fs::write(dir.path().join(".pitboss/play/state.json"), "{}\n").unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
 
-        git.stage_changes(&[
-            Path::new("plan.md"),
-            Path::new("deferred.md"),
-            Path::new(".pitboss"),
-        ])
-        .await
-        .unwrap();
+        git.stage_changes(&[Path::new(".pitboss")]).await.unwrap();
 
         let staged = std::process::Command::new("git")
             .args(["-C"])
@@ -486,24 +604,22 @@ mod tests {
 
     #[tokio::test]
     async fn empty_commit_path_when_only_excluded_files_changed() {
-        // The runner contract: if the agent only modified `.pitboss/`,
-        // `plan.md`, or `deferred.md`, `stage_changes` finds nothing to stage
-        // and `has_staged_changes` returns false. Runner skips commit.
+        // The runner contract: if the agent only modified files under
+        // `.pitboss/`, `stage_changes` finds nothing to stage and
+        // `has_staged_changes` returns false. Runner skips commit.
         let dir = fresh_repo().await;
         let git = ShellGit::new(dir.path());
 
-        fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
-        fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
-        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
-        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
-
-        git.stage_changes(&[
-            Path::new("plan.md"),
-            Path::new("deferred.md"),
-            Path::new(".pitboss"),
-        ])
-        .await
+        fs::create_dir_all(dir.path().join(".pitboss/play")).unwrap();
+        fs::write(dir.path().join(".pitboss/play/plan.md"), "plan body\n").unwrap();
+        fs::write(
+            dir.path().join(".pitboss/play/deferred.md"),
+            "deferred body\n",
+        )
         .unwrap();
+        fs::write(dir.path().join(".pitboss/play/state.json"), "{}\n").unwrap();
+
+        git.stage_changes(&[Path::new(".pitboss")]).await.unwrap();
 
         assert!(
             !git.has_staged_changes().await.unwrap(),
@@ -605,17 +721,16 @@ mod tests {
 
         // Mirror the runner's pre-audit setup: implementer touched both
         // planning artifacts and code; only code should make it into the diff.
-        fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
-        fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss/play")).unwrap();
+        fs::write(dir.path().join(".pitboss/play/plan.md"), "plan body\n").unwrap();
+        fs::write(
+            dir.path().join(".pitboss/play/deferred.md"),
+            "deferred body\n",
+        )
+        .unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
-        git.stage_changes(&[
-            Path::new("plan.md"),
-            Path::new("deferred.md"),
-            Path::new(".pitboss"),
-        ])
-        .await
-        .unwrap();
+        git.stage_changes(&[Path::new(".pitboss")]).await.unwrap();
 
         let diff = git.staged_diff().await.unwrap();
         assert!(diff.contains("src/foo.rs"), "diff: {diff}");

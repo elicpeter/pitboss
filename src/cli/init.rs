@@ -49,10 +49,11 @@ const DEFERRED_TEMPLATE: &str = "\
 ## Deferred phases
 ";
 
-/// Default `pitboss.toml`. The values here mirror [`crate::config::Config`]'s
-/// `Default` impl exactly — a freshly initialized workspace round-trips
-/// through `config::load` to `Config::default()`. Edit both together.
-const PITBOSS_TOML_TEMPLATE: &str = "\
+/// Default `.pitboss/config.toml`. The values here mirror
+/// [`crate::config::Config`]'s `Default` impl exactly — a freshly initialized
+/// workspace round-trips through `config::load` to `Config::default()`. Edit
+/// both together.
+const CONFIG_TOML_TEMPLATE: &str = "\
 # pitboss configuration
 
 [models]
@@ -79,6 +80,16 @@ create_pr = false
 [caveman]
 enabled = false
 intensity = \"full\"
+
+# Grind mode: rotating prompt runner.
+# - Drop prompt files in .pitboss/grind/prompts/<name>.md (pitboss prompts new
+#   <name> scaffolds one).
+# - Drop rotation files in .pitboss/grind/rotations/<name>.toml; select with
+#   `pitboss grind --rotation <name>` or set `default_rotation` below.
+[grind]
+# default_rotation = \"nightly\"
+max_parallel = 1
+consecutive_failure_limit = 3
 ";
 
 /// Marker line appended to `.gitignore`. Matched verbatim against trimmed
@@ -108,10 +119,10 @@ pub struct ReportEntry {
 
 /// Scaffold a pitboss workspace under `workspace`. Idempotent.
 ///
-/// Stdout receives one line per artifact ("created plan.md",
-/// "skipped plan.md (already exists)", etc.). Stderr receives a warning for
-/// each pre-existing file we left alone, so users notice when init found a
-/// populated workspace.
+/// Stdout receives one line per artifact ("created .pitboss/play/plan.md",
+/// "skipped .pitboss/play/plan.md (already exists)", etc.). Stderr receives a
+/// warning for each pre-existing file we left alone, so users notice when init
+/// found a populated workspace.
 pub fn run(workspace: impl AsRef<Path>) -> Result<()> {
     let workspace = workspace.as_ref();
     let mut report: Vec<ReportEntry> = Vec::new();
@@ -119,23 +130,43 @@ pub fn run(workspace: impl AsRef<Path>) -> Result<()> {
     fs::create_dir_all(workspace)
         .with_context(|| format!("init: creating workspace {:?}", workspace))?;
 
-    write_if_missing(workspace, "plan.md", PLAN_TEMPLATE.as_bytes(), &mut report)?;
+    // Reject early if `.pitboss` exists as a non-directory. Without this
+    // check, write_if_missing would surface a low-level "Not a directory" OS
+    // error trying to mkdir-p its parent — clear on close inspection but
+    // confusing in a stderr scroll.
+    let pitboss_root = workspace.join(".pitboss");
+    if pitboss_root.exists() && !pitboss_root.is_dir() {
+        anyhow::bail!(
+            "init: {:?} exists but is not a directory; refusing to overwrite",
+            pitboss_root
+        );
+    }
+
     write_if_missing(
         workspace,
-        "deferred.md",
+        ".pitboss/play/plan.md",
+        PLAN_TEMPLATE.as_bytes(),
+        &mut report,
+    )?;
+    write_if_missing(
+        workspace,
+        ".pitboss/play/deferred.md",
         DEFERRED_TEMPLATE.as_bytes(),
         &mut report,
     )?;
     write_if_missing(
         workspace,
-        "pitboss.toml",
-        PITBOSS_TOML_TEMPLATE.as_bytes(),
+        ".pitboss/config.toml",
+        CONFIG_TOML_TEMPLATE.as_bytes(),
         &mut report,
     )?;
 
-    ensure_dir(workspace, ".pitboss", &mut report)?;
-    ensure_dir(workspace, ".pitboss/snapshots", &mut report)?;
-    ensure_dir(workspace, ".pitboss/logs", &mut report)?;
+    ensure_dir(workspace, ".pitboss/play/snapshots", &mut report)?;
+    ensure_dir(workspace, ".pitboss/play/logs", &mut report)?;
+
+    ensure_dir(workspace, ".pitboss/grind/prompts", &mut report)?;
+    ensure_dir(workspace, ".pitboss/grind/rotations", &mut report)?;
+    ensure_dir(workspace, ".pitboss/grind/runs", &mut report)?;
 
     init_state_file(workspace, &mut report)?;
     update_gitignore(workspace, &mut report)?;
@@ -198,7 +229,7 @@ fn ensure_dir(workspace: &Path, rel: &str, report: &mut Vec<ReportEntry>) -> Res
 
 fn init_state_file(workspace: &Path, report: &mut Vec<ReportEntry>) -> Result<()> {
     let path = state::state_path(workspace);
-    let rel = ".pitboss/state.json".to_string();
+    let rel = ".pitboss/play/state.json".to_string();
     if path.exists() {
         warn_skipped(&rel);
         report.push(ReportEntry {
@@ -329,13 +360,18 @@ mod tests {
         run(dir.path()).unwrap();
 
         for rel in [
-            "plan.md",
-            "deferred.md",
-            "pitboss.toml",
             ".pitboss",
-            ".pitboss/snapshots",
-            ".pitboss/logs",
-            ".pitboss/state.json",
+            ".pitboss/config.toml",
+            ".pitboss/play",
+            ".pitboss/play/plan.md",
+            ".pitboss/play/deferred.md",
+            ".pitboss/play/state.json",
+            ".pitboss/play/snapshots",
+            ".pitboss/play/logs",
+            ".pitboss/grind",
+            ".pitboss/grind/prompts",
+            ".pitboss/grind/rotations",
+            ".pitboss/grind/runs",
             ".gitignore",
         ] {
             assert!(
@@ -346,12 +382,13 @@ mod tests {
         }
 
         // plan.md template parses cleanly.
-        let plan_text = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        let plan_text = fs::read_to_string(dir.path().join(".pitboss/play/plan.md")).unwrap();
         let plan = crate::plan::parse(&plan_text).expect("seed plan.md must parse");
         assert_eq!(plan.current_phase.as_str(), "01");
 
         // deferred.md template parses cleanly.
-        let deferred_text = fs::read_to_string(dir.path().join("deferred.md")).unwrap();
+        let deferred_text =
+            fs::read_to_string(dir.path().join(".pitboss/play/deferred.md")).unwrap();
         crate::deferred::parse(&deferred_text).expect("seed deferred.md must parse");
 
         // state.json is JSON null (no run started).
@@ -364,10 +401,10 @@ mod tests {
         run(dir.path()).unwrap();
 
         let snapshot_paths = [
-            "plan.md",
-            "deferred.md",
-            "pitboss.toml",
-            ".pitboss/state.json",
+            ".pitboss/config.toml",
+            ".pitboss/play/plan.md",
+            ".pitboss/play/deferred.md",
+            ".pitboss/play/state.json",
             ".gitignore",
         ];
         let before: Vec<Vec<u8>> = snapshot_paths
@@ -388,11 +425,13 @@ mod tests {
     fn preexisting_plan_md_survives_byte_for_byte() {
         let dir = tempdir().unwrap();
         let custom = "---\ncurrent_phase: \"05\"\n---\n\n# Phase 05: Custom\n\nbody.\n";
-        fs::write(dir.path().join("plan.md"), custom).unwrap();
+        let plan_path = dir.path().join(".pitboss/play/plan.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, custom).unwrap();
 
         run(dir.path()).unwrap();
 
-        let after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        let after = fs::read_to_string(&plan_path).unwrap();
         assert_eq!(after, custom);
     }
 
@@ -465,19 +504,33 @@ mod tests {
         // exercise the lower-level helpers to ensure the Action variants are
         // produced as expected.
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("plan.md"), "preexisting\n").unwrap();
+        let plan_path = dir.path().join(".pitboss/play/plan.md");
+        fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        fs::write(&plan_path, "preexisting\n").unwrap();
 
         let mut report = Vec::new();
-        write_if_missing(dir.path(), "plan.md", PLAN_TEMPLATE.as_bytes(), &mut report).unwrap();
         write_if_missing(
             dir.path(),
-            "deferred.md",
+            ".pitboss/play/plan.md",
+            PLAN_TEMPLATE.as_bytes(),
+            &mut report,
+        )
+        .unwrap();
+        write_if_missing(
+            dir.path(),
+            ".pitboss/play/deferred.md",
             DEFERRED_TEMPLATE.as_bytes(),
             &mut report,
         )
         .unwrap();
 
-        assert_eq!(paths_with(&report, Action::Skipped), vec!["plan.md"]);
-        assert_eq!(paths_with(&report, Action::Created), vec!["deferred.md"]);
+        assert_eq!(
+            paths_with(&report, Action::Skipped),
+            vec![".pitboss/play/plan.md"]
+        );
+        assert_eq!(
+            paths_with(&report, Action::Created),
+            vec![".pitboss/play/deferred.md"]
+        );
     }
 }

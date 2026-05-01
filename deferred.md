@@ -1,3 +1,0 @@
-## Deferred items
-
-## Deferred phases

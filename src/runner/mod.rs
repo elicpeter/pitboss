@@ -33,7 +33,7 @@ use crate::plan::{self, PhaseId, Plan, Snapshot};
 use crate::prompts;
 use crate::state::{self, RunState, TokenUsage};
 use crate::tests as project_tests;
-use crate::util::write_atomic;
+use crate::util::{paths, write_atomic};
 
 /// Default agent wall-clock cap. Conservative so a stuck agent does not strand
 /// a run for an unbounded time; phase 18 makes this configurable.
@@ -201,6 +201,11 @@ pub enum Event {
     },
     /// The runner advanced past the final phase. No further phases remain.
     RunFinished,
+    /// Aggregated token usage was updated after an agent dispatch finished.
+    /// Carries a snapshot of [`crate::state::RunState::token_usage`] so
+    /// subscribers can show running cost / token totals without needing a
+    /// reference to the runner state.
+    UsageUpdated(crate::state::TokenUsage),
 }
 
 /// Outcome of [`Runner::run_phase`].
@@ -379,7 +384,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
 
     /// Execute the current phase to completion (success or halt).
     ///
-    /// Persists [`RunState`] to `.pitboss/state.json` on every exit — including
+    /// Persists [`RunState`] to `.pitboss/play/state.json` on every exit — including
     /// halts — so the attempts counter and accumulated token usage survive a
     /// halted phase and a subsequent `pitboss play` (or `pitboss rebuy`)
     /// invocation can pick them up.
@@ -415,8 +420,8 @@ impl<A: Agent, G: Git> Runner<A, G> {
             attempt,
         });
 
-        let plan_path = self.workspace.join("plan.md");
-        let deferred_path = self.workspace.join("deferred.md");
+        let plan_path = paths::plan_path(&self.workspace);
+        let deferred_path = paths::deferred_path(&self.workspace);
 
         let user_prompt = prompts::implementer(&self.plan, &self.deferred, &phase);
         let log_path = self.attempt_log_path(&phase_id, "implementer", attempt);
@@ -428,6 +433,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             workdir: self.workspace.clone(),
             log_path,
             timeout: DEFAULT_AGENT_TIMEOUT,
+            env: std::collections::HashMap::new(),
         };
 
         match self
@@ -464,8 +470,9 @@ impl<A: Agent, G: Git> Runner<A, G> {
             let _ = self.events_tx.send(Event::TestsSkipped);
         }
 
-        let plan_rel = Path::new("plan.md");
-        let deferred_rel = Path::new("deferred.md");
+        // Every pitboss artifact lives under `.pitboss/`, which is gitignored,
+        // so a single exclude entry covers plan.md, deferred.md, state.json,
+        // logs, snapshots, grind state, etc.
         let pitboss_rel = Path::new(".pitboss");
 
         match self
@@ -474,7 +481,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 test_runner.as_ref(),
                 &plan_path,
                 &deferred_path,
-                &[plan_rel, deferred_rel, pitboss_rel],
+                &[pitboss_rel],
             )
             .await?
         {
@@ -486,7 +493,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
         // auditor was skipped (disabled, or no code changes to audit) this is
         // the first stage call of the phase.
         self.git
-            .stage_changes(&[plan_rel, deferred_rel, pitboss_rel])
+            .stage_changes(&[pitboss_rel])
             .await
             .context("runner: staging code-only changes")?;
 
@@ -580,9 +587,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
     }
 
     fn attempt_log_path(&self, phase_id: &PhaseId, role: &str, attempt: u32) -> PathBuf {
-        self.workspace
-            .join(".pitboss")
-            .join("logs")
+        paths::play_logs_dir(&self.workspace)
             .join(format!("phase-{}-{}-{}.log", phase_id, role, attempt))
     }
 
@@ -745,6 +750,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 workdir: self.workspace.clone(),
                 log_path,
                 timeout: DEFAULT_AGENT_TIMEOUT,
+                env: std::collections::HashMap::new(),
             };
 
             match self
@@ -844,6 +850,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             workdir: self.workspace.clone(),
             log_path,
             timeout: DEFAULT_AGENT_TIMEOUT,
+            env: std::collections::HashMap::new(),
         };
 
         match self
@@ -885,6 +892,9 @@ impl<A: Agent, G: Git> Runner<A, G> {
             e.input += v.input;
             e.output += v.output;
         }
+        let _ = self
+            .events_tx
+            .send(Event::UsageUpdated(self.state.token_usage.clone()));
     }
 
     fn restore_deferred(
@@ -1181,6 +1191,10 @@ fn log_event_line(event: &Event) {
             if c {
                 eprintln!("{rule}");
             }
+        }
+        Event::UsageUpdated(_) => {
+            // Snapshot consumed by the TUI; the plain logger doesn't surface
+            // running token totals to keep stderr clean.
         }
     }
 }

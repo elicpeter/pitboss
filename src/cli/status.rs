@@ -1,9 +1,10 @@
 //! `pitboss status` — print a summary of the current run.
 //!
-//! Loads `state.json`, `plan.md`, and `deferred.md` and renders a multi-line
-//! report covering the run id and branch, the active phase against the
-//! plan's phase count, completed phases, deferred work, accumulated token
-//! usage, and the last commit on the run branch.
+//! Loads `.pitboss/play/state.json`, `.pitboss/play/plan.md`, and
+//! `.pitboss/play/deferred.md` and renders a multi-line report covering the
+//! run id and branch, the active phase against the plan's phase count,
+//! completed phases, deferred work, accumulated token usage, and the last
+//! commit on the run branch.
 //!
 //! `status` is read-only: it never mutates state, never creates branches, and
 //! is safe to invoke at any time. A workspace with no started run prints a
@@ -21,6 +22,7 @@ use crate::deferred::{self, DeferredDoc};
 use crate::plan::{self, Plan};
 use crate::runner;
 use crate::state::{self, RunState};
+use crate::util::paths;
 
 /// Top-level entry point for the `status` subcommand. Prints to stdout.
 pub fn run(workspace: PathBuf) -> Result<()> {
@@ -82,7 +84,11 @@ pub fn render_report(
             out.push_str(&format!(
                 "{}: {}\n",
                 lbl("run"),
-                col(c, style::YELLOW, "not started (no .pitboss/state.json)")
+                col(
+                    c,
+                    style::YELLOW,
+                    "not started (no .pitboss/play/state.json)"
+                )
             ));
         }
         Some(s) if s.aborted => {
@@ -230,13 +236,13 @@ fn render_budgets(config: &Config, usage: &crate::state::TokenUsage, c: bool) ->
 }
 
 fn load_plan(workspace: &Path) -> Result<Plan> {
-    let path = workspace.join("plan.md");
+    let path = paths::plan_path(workspace);
     let text = fs::read_to_string(&path).with_context(|| format!("status: reading {:?}", path))?;
     plan::parse(&text).with_context(|| format!("status: parsing {:?}", path))
 }
 
 fn load_deferred(workspace: &Path) -> Result<DeferredDoc> {
-    let path = workspace.join("deferred.md");
+    let path = paths::deferred_path(workspace);
     match fs::read_to_string(&path) {
         Ok(text) => {
             if text.trim().is_empty() {

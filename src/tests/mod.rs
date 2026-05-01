@@ -9,7 +9,7 @@
 //!
 //! [`detect`] probes the workspace for a recognized project layout and returns
 //! a [`TestRunner`] preconfigured to invoke the right command. The probe is
-//! best-effort; pitboss.toml's `[tests] command = "..."` overrides detection
+//! best-effort; config.toml's `[tests] command = "..."` overrides detection
 //! entirely, in which case the configured command is used verbatim.
 //!
 //! [`TestRunner::run`] executes the runner, tees combined stdout+stderr to a
@@ -61,7 +61,7 @@ pub struct TestOutcome {
 ///
 /// Independent of `program`/`args` because callers occasionally want to log or
 /// branch on the kind without re-parsing the command line. [`TestRunnerKind::Override`]
-/// signals that the runner came from `pitboss.toml` rather than detection.
+/// signals that the runner came from `config.toml` rather than detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestRunnerKind {
     /// `cargo test` — chosen when `Cargo.toml` is present.
@@ -108,6 +108,22 @@ pub struct TestRunner {
     pub args: Vec<String>,
     /// Working directory the process is spawned in.
     pub workdir: PathBuf,
+    /// Extra env vars layered on top of pitboss's inherited environment.
+    /// Used by parallel-session verify cycles to point `CARGO_TARGET_DIR`
+    /// at the main workspace's `target/` so each worktree doesn't pay a
+    /// full rebuild cost. Empty by default; merge via
+    /// [`TestRunner::with_env`].
+    pub env: std::collections::HashMap<String, String>,
+}
+
+impl TestRunner {
+    /// Layer additional env vars onto the runner. Existing keys are
+    /// overwritten; unrelated keys are left intact. Returns `self` so the
+    /// call site can chain.
+    pub fn with_env(mut self, env: std::collections::HashMap<String, String>) -> Self {
+        self.env.extend(env);
+        self
+    }
 }
 
 impl TestRunner {
@@ -126,6 +142,7 @@ impl TestRunner {
             program,
             args,
             workdir: workdir.into(),
+            env: std::collections::HashMap::new(),
         })
     }
 
@@ -173,6 +190,9 @@ impl TestRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if !self.env.is_empty() {
+            cmd.envs(self.env.iter());
+        }
 
         let mut child = cmd
             .spawn()
@@ -292,6 +312,7 @@ pub fn detect(workdir: impl AsRef<Path>, override_command: Option<&str>) -> Opti
             program: "cargo".into(),
             args: vec!["test".into()],
             workdir: workdir.to_path_buf(),
+            env: std::collections::HashMap::new(),
         });
     }
 
@@ -305,6 +326,7 @@ pub fn detect(workdir: impl AsRef<Path>, override_command: Option<&str>) -> Opti
             program: "pytest".into(),
             args: Vec::new(),
             workdir: workdir.to_path_buf(),
+            env: std::collections::HashMap::new(),
         });
     }
 
@@ -314,6 +336,7 @@ pub fn detect(workdir: impl AsRef<Path>, override_command: Option<&str>) -> Opti
             program: "go".into(),
             args: vec!["test".into(), "./...".into()],
             workdir: workdir.to_path_buf(),
+            env: std::collections::HashMap::new(),
         });
     }
 
@@ -349,6 +372,7 @@ fn detect_node(workdir: &Path) -> Option<TestRunner> {
         program: program.into(),
         args,
         workdir: workdir.to_path_buf(),
+        env: std::collections::HashMap::new(),
     })
 }
 
@@ -566,6 +590,7 @@ mod tests {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "echo failure-marker; exit 7".into()],
             workdir: dir.path().to_path_buf(),
+            env: std::collections::HashMap::new(),
         };
         let outcome = runner.run(dir.path().join("test.log")).await.unwrap();
         assert!(!outcome.passed);
@@ -624,6 +649,7 @@ mod tests {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), script],
             workdir: dir.path().to_path_buf(),
+            env: std::collections::HashMap::new(),
         };
         let outcome = runner.run(dir.path().join("test.log")).await.unwrap();
         assert!(!outcome.passed);
@@ -648,6 +674,7 @@ mod tests {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "echo on-stderr 1>&2; exit 1".into()],
             workdir: dir.path().to_path_buf(),
+            env: std::collections::HashMap::new(),
         };
         let outcome = runner.run(dir.path().join("test.log")).await.unwrap();
         assert!(!outcome.passed);
@@ -666,6 +693,7 @@ mod tests {
             program: "/this/binary/does/not/exist".into(),
             args: Vec::new(),
             workdir: dir.path().to_path_buf(),
+            env: std::collections::HashMap::new(),
         };
         let err = runner.run(dir.path().join("test.log")).await.unwrap_err();
         assert!(

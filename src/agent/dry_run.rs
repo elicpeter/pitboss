@@ -172,6 +172,7 @@ mod tests {
             workdir: PathBuf::from("/tmp"),
             log_path: PathBuf::from("/tmp/dry-run.log"),
             timeout,
+            env: std::collections::HashMap::new(),
         }
     }
 

@@ -1,10 +1,10 @@
-//! Runner-owned state stored at `.pitboss/state.json`.
+//! Runner-owned state stored at `.pitboss/play/state.json`.
 //!
 //! Phase 2 introduces the type vocabulary; phase 5 wires the atomic load/save
 //! helpers that read and write this struct from disk.
 //!
-//! The on-disk form is `Option<RunState>` so a freshly-initialized workspace —
-//! no run started yet — round-trips as JSON `null`. [`load`] returns `Ok(None)`
+//! The on-disk form is `Option<RunState>` so a freshly-initialized workspace
+//! (no run started yet) round-trips as JSON `null`. [`load`] returns `Ok(None)`
 //! for a missing file or a `null` payload; [`save`] writes either `null` or the
 //! pretty-printed [`RunState`] via [`crate::util::write_atomic`].
 
@@ -17,12 +17,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::plan::PhaseId;
-use crate::util::write_atomic;
+use crate::util::{paths, write_atomic};
 
 /// Path of the runner-owned state file inside a workspace
-/// (`<workspace>/.pitboss/state.json`).
+/// (`<workspace>/.pitboss/play/state.json`).
 pub fn state_path(workspace: impl AsRef<Path>) -> PathBuf {
-    workspace.as_ref().join(".pitboss").join("state.json")
+    paths::state_path(workspace)
 }
 
 /// Read the state file from a workspace.
@@ -48,8 +48,8 @@ pub fn load(workspace: impl AsRef<Path>) -> Result<Option<RunState>> {
     Ok(parsed)
 }
 
-/// Atomically write the state file. Creates the `.pitboss/` directory if it
-/// does not already exist. Pass `None` to mark the workspace as having no
+/// Atomically write the state file. Creates the `.pitboss/play/` directory if
+/// it does not already exist. Pass `None` to mark the workspace as having no
 /// active run; the file is written as JSON `null`.
 pub fn save(workspace: impl AsRef<Path>, state: Option<&RunState>) -> Result<()> {
     let path = state_path(&workspace);
@@ -84,7 +84,7 @@ pub struct TokenUsage {
     pub by_role: HashMap<String, RoleUsage>,
 }
 
-/// Persistent runner state stored at `.pitboss/state.json`.
+/// Persistent runner state stored at `.pitboss/play/state.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunState {
     /// Stable identifier for this run (typically a UTC timestamp slug).
@@ -112,7 +112,7 @@ pub struct RunState {
     /// (originally named `pitboss abort`, hence the field name preserved here
     /// for backwards compatibility with state files written before the
     /// rename). `pitboss play` and `pitboss rebuy` refuse to act on a folded
-    /// run; the user must clear `.pitboss/state.json` (e.g., re-run
+    /// run; the user must clear `.pitboss/play/state.json` (e.g., re-run
     /// `pitboss init` after removing it) to start over.
     #[serde(default)]
     pub aborted: bool,
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn load_returns_none_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
-        // No `.pitboss/` at all.
+        // No `.pitboss/play/` at all.
         assert!(load(dir.path()).unwrap().is_none());
     }
 

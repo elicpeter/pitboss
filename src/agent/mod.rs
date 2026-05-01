@@ -8,7 +8,7 @@
 //! ## Shape
 //!
 //! - [`AgentRequest`] is the per-dispatch input. Composed once by the runner
-//!   from `pitboss.toml`, the active phase, and the prompt template.
+//!   from `config.toml`, the active phase, and the prompt template.
 //! - [`AgentEvent`] is streamed on the caller-supplied
 //!   [`tokio::sync::mpsc::Sender`] while the agent runs. Events are best-effort
 //!   — if the receiver is dropped, the agent keeps running and continues to
@@ -27,6 +27,7 @@ pub mod dry_run;
 pub mod gemini;
 pub mod subprocess;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -42,7 +43,7 @@ pub use subprocess::{run_logged, run_logged_with_stdin, SubprocessOutcome};
 
 /// Which agent role is being dispatched.
 ///
-/// Round-trips through serde as the lowercase string used in `pitboss.toml`'s
+/// Round-trips through serde as the lowercase string used in `config.toml`'s
 /// `[models]` keys, so a single source of truth covers config and runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -58,7 +59,7 @@ pub enum Role {
 }
 
 impl Role {
-    /// String name matching the `pitboss.toml` `[models]` key. Stable.
+    /// String name matching the `config.toml` `[models]` key. Stable.
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Planner => "planner",
@@ -95,6 +96,12 @@ pub struct AgentRequest {
     /// Hard wall-clock cap. If the agent is still running when this elapses
     /// the impl must terminate it and return [`StopReason::Timeout`].
     pub timeout: Duration,
+    /// Extra environment variables the agent must apply to any subprocess it
+    /// spawns. The grind runner uses this to surface `PITBOSS_RUN_ID`,
+    /// `PITBOSS_PROMPT_NAME`, `PITBOSS_SUMMARY_FILE`, `PITBOSS_SCRATCHPAD`,
+    /// and `PITBOSS_SESSION_SEQ` to the dispatched agent. The phased `play`
+    /// runner leaves this empty.
+    pub env: HashMap<String, String>,
 }
 
 /// Streaming events emitted while an agent runs.
@@ -192,7 +199,7 @@ impl<A: Agent + ?Sized> Agent for Box<A> {
 }
 
 /// Construct the agent the runner should dispatch through, based on
-/// `pitboss.toml`'s `[agent] backend` selector.
+/// `config.toml`'s `[agent] backend` selector.
 ///
 /// A missing or absent `backend` falls back to [`backend::BackendKind::default`]
 /// (Claude Code) so workspaces without an `[agent]` section keep today's
@@ -218,6 +225,9 @@ pub fn build_agent(cfg: &crate::config::Config) -> Result<Box<dyn Agent + Send +
             }
             if let Some(model) = overrides.model.as_deref() {
                 agent = agent.with_model_override(model);
+            }
+            if let Some(mode) = overrides.permission_mode.as_deref() {
+                agent = agent.with_permission_mode(mode);
             }
             Ok(Box::new(agent))
         }

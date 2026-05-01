@@ -39,8 +39,8 @@ fn todo_cli_plan_parses_and_round_trips() {
 
 #[test]
 fn todo_cli_pitboss_toml_parses() {
-    let path = examples_dir().join("todo-cli").join("pitboss.toml");
-    let text = fs::read_to_string(&path).expect("read pitboss.toml");
+    let path = examples_dir().join("todo-cli").join("config.toml");
+    let text = fs::read_to_string(&path).expect("read config.toml");
     let cfg =
         pitboss::config::parse(&text).unwrap_or_else(|e| panic!("parse {}: {e:#}", path.display()));
     // Spot-check a couple of fields the example deliberately overrides.

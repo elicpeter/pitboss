@@ -9,7 +9,10 @@
 //! token usage. The text is intentionally plain markdown — no HTML, no GH
 //! mentions — so it survives `gh pr create --body` verbatim.
 
+use anyhow::{Context, Result};
+
 use crate::deferred::DeferredDoc;
+use crate::git::Git;
 use crate::plan::Plan;
 use crate::state::RunState;
 
@@ -137,6 +140,36 @@ pub fn pr_body(summary: &PrSummary<'_>) -> String {
     }
 
     out
+}
+
+/// One-line PR title for a `pitboss grind --pr` run.
+///
+/// Format: `grind/<plan-or-default>: <run-id>`. Stable so a script watching
+/// the PR queue can match on it. The run id is already a UTC timestamp + hex
+/// suffix, so the title is unique per run.
+pub fn grind_pr_title(plan_name: &str, run_id: &str) -> String {
+    format!("grind/{plan_name}: {run_id}")
+}
+
+/// Open a pull request for a finished `pitboss grind` run. The body is the
+/// run's `sessions.md` verbatim — the markdown projection of `sessions.jsonl`
+/// is already a reviewable per-session table (see
+/// [`crate::grind::render_sessions_md`]). Returns the URL `gh pr create`
+/// printed on success.
+///
+/// Lives next to [`pr_title`] / [`pr_body`] (both `pitboss play` helpers) so
+/// the two subcommands share one PR module rather than each carrying their
+/// own gh shell-out wrapper.
+pub async fn open_grind_pr<G: Git + ?Sized>(
+    git: &G,
+    plan_name: &str,
+    run_id: &str,
+    sessions_md: &str,
+) -> Result<String> {
+    let title = grind_pr_title(plan_name, run_id);
+    git.open_pr(&title, sessions_md)
+        .await
+        .context("opening PR via gh pr create")
 }
 
 #[cfg(test)]

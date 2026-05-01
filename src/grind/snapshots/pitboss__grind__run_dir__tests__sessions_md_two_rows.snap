@@ -1,0 +1,29 @@
+---
+source: src/grind/run_dir.rs
+expression: s
+---
+# Sessions
+
+## session-0001 — fp-hunter (ok)
+
+- started: 2026-04-30T18:05:00Z
+- ended: 2026-04-30T18:06:30Z
+- duration: 90s
+- commit: abc1234
+- tokens: 1500 (in 1000 / out 500)
+- cost: $0.0123
+- transcript: transcripts/session-0001.log
+- summary:
+
+    fixed the foo bug in bar.rs
+
+## session-0002 — fp-hunter (error)
+
+- started: 2026-04-30T18:05:00Z
+- ended: 2026-04-30T18:06:30Z
+- duration: 90s
+- commit: (none)
+- tokens: 1500 (in 1000 / out 500)
+- cost: $0.0123
+- transcript: transcripts/session-0002.log
+- summary: (none)

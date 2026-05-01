@@ -14,8 +14,9 @@
 //! even on panic or early return.
 
 mod app;
+pub mod grind;
 
-pub use app::{Activity, AgentDisplay, App, PhaseStatus, OUTPUT_BUFFER_LINES};
+pub use app::{Activity, AgentDisplay, App, PhaseStatus, UsageView, OUTPUT_BUFFER_LINES};
 
 use std::io;
 use std::time::Duration;
@@ -57,10 +58,11 @@ where
     let plan = runner.plan().clone();
     let state = runner.state().clone();
     let agent_display = build_agent_display(runner.config(), runner.agent().name());
+    let usage_view = build_usage_view(runner.config());
     let rx = runner.subscribe();
 
     let mut guard = TerminalGuard::setup().context("tui: setting up terminal")?;
-    let app = App::new(plan, state, agent_display);
+    let app = App::new(plan, state, agent_display, usage_view);
 
     let outcome = tokio::select! {
         biased;
@@ -113,6 +115,43 @@ fn build_agent_display(cfg: &Config, agent_name: &str) -> AgentDisplay {
     }
 }
 
+/// Build the [`UsageView`] the session-stats panel uses to price running
+/// token totals. The role/model mapping mirrors the precedence in
+/// [`build_agent_display`]: a `[agent.<backend>] model = "..."` override wins
+/// over `[models].<role>` so the panel costs each role against the same model
+/// the dispatcher actually sends.
+fn build_usage_view(cfg: &Config) -> UsageView {
+    let kind = cfg
+        .agent
+        .backend
+        .as_deref()
+        .and_then(|s| s.parse::<BackendKind>().ok())
+        .unwrap_or_default();
+    let overrides: &BackendOverrides = match kind {
+        BackendKind::ClaudeCode => &cfg.agent.claude_code,
+        BackendKind::Codex => &cfg.agent.codex,
+        BackendKind::Aider => &cfg.agent.aider,
+        BackendKind::Gemini => &cfg.agent.gemini,
+    };
+    let resolve = |role_default: &str| {
+        overrides
+            .model
+            .as_deref()
+            .unwrap_or(role_default)
+            .to_string()
+    };
+    let role_models = vec![
+        ("planner".to_string(), resolve(&cfg.models.planner)),
+        ("implementer".to_string(), resolve(&cfg.models.implementer)),
+        ("fixer".to_string(), resolve(&cfg.models.fixer)),
+        ("auditor".to_string(), resolve(&cfg.models.auditor)),
+    ];
+    UsageView {
+        role_models,
+        pricing: cfg.budgets.pricing.clone(),
+    }
+}
+
 enum Outcome {
     Runner(RunSummary),
     User(UserOutcome),
@@ -136,13 +175,13 @@ enum UserOutcome {
 /// The explicit [`Self::restore`] path surfaces teardown errors when nothing
 /// else has gone wrong; the `Drop` path swallows them because we cannot
 /// usefully report errors during unwinding.
-struct TerminalGuard {
+pub(crate) struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
     active: bool,
 }
 
 impl TerminalGuard {
-    fn setup() -> Result<Self> {
+    pub(crate) fn setup() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
@@ -163,11 +202,11 @@ impl TerminalGuard {
         }
     }
 
-    fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
+    pub(crate) fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
         &mut self.terminal
     }
 
-    fn restore(&mut self) -> Result<()> {
+    pub(crate) fn restore(&mut self) -> Result<()> {
         if !self.active {
             return Ok(());
         }
@@ -201,7 +240,7 @@ impl Drop for TerminalGuard {
 
 /// Frame interval. Aggressive enough for streaming agent output to feel
 /// live; loose enough not to thrash the terminal when nothing is happening.
-const TICK_INTERVAL: Duration = Duration::from_millis(80);
+pub(crate) const TICK_INTERVAL: Duration = Duration::from_millis(80);
 
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -289,7 +328,7 @@ mod tests {
             fixer_model: "claude-sonnet-4-6".into(),
             auditor_model: "claude-sonnet-4-6".into(),
         };
-        App::new(plan, state, agent_display)
+        App::new(plan, state, agent_display, UsageView::default())
     }
 
     #[test]

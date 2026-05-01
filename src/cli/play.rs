@@ -1,9 +1,10 @@
 //! `pitboss play` — execute the plan against the configured agent.
 //!
-//! Loads the workspace's `pitboss.toml`, `plan.md`, `deferred.md`, and
-//! `state.json`; ensures a per-run branch exists; spawns a
-//! [`tokio::sync::broadcast`] subscriber that streams [`runner::Event`]s to
-//! stderr; then drives the runner until the plan completes or a phase halts.
+//! Loads the workspace's `.pitboss/config.toml`, `.pitboss/play/plan.md`,
+//! `.pitboss/play/deferred.md`, and `.pitboss/play/state.json`; ensures a
+//! per-run branch exists; spawns a [`tokio::sync::broadcast`] subscriber that
+//! streams [`runner::Event`]s to stderr; then drives the runner until the plan
+//! completes or a phase halts.
 //!
 //! On a fresh run (state file is `null` or missing) this command derives a new
 //! `run_id` and per-run branch from the current UTC timestamp, captures the
@@ -13,7 +14,7 @@
 //! [`execute`] with [`StartMode::Resume`] to require an existing state file.
 //!
 //! Folded runs (`state.aborted == true`) are refused, the user must clear
-//! `.pitboss/state.json` to start a new run.
+//! `.pitboss/play/state.json` to start a new run.
 //!
 //! `pitboss run` is kept as a clap alias of `pitboss play`, so existing
 //! scripts and muscle memory continue to work unchanged.
@@ -35,6 +36,7 @@ use crate::plan::{self, Plan};
 use crate::runner::{self, RunSummary, Runner};
 use crate::state::{self, TokenUsage};
 use crate::tui;
+use crate::util::paths;
 
 /// Whether [`execute`] is allowed to start a fresh run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +52,8 @@ pub enum StartMode {
 /// `tui` toggles between the plain stderr logger (default) and the
 /// `ratatui` dashboard. `pr` opts into the post-run pull-request creation
 /// step described in [`execute`]; either it or `git.create_pr = true` in
-/// `pitboss.toml` enables the step. `dry_run` swaps the configured agent
-/// for the deterministic [`DryRunAgent`] so the run can be exercised
+/// `.pitboss/config.toml` enables the step. `dry_run` swaps the configured
+/// agent for the deterministic [`DryRunAgent`] so the run can be exercised
 /// end-to-end without any model spend.
 pub async fn run(workspace: PathBuf, tui: bool, pr: bool, dry_run: bool) -> Result<()> {
     execute(workspace, tui, pr, dry_run, StartMode::Fresh).await
@@ -65,7 +67,7 @@ pub async fn run(workspace: PathBuf, tui: bool, pr: bool, dry_run: bool) -> Resu
 /// (logger or TUI); then drives [`Runner::run`] to completion or halt.
 ///
 /// When the run finishes (no halt) and either `pr_flag` is set or
-/// `git.create_pr = true` in `pitboss.toml`, the function shells out to
+/// `git.create_pr = true` in `config.toml`, the function shells out to
 /// `gh pr create` via [`Git::open_pr`] using a title and body generated from
 /// the completed phases plus any remaining deferred work. PR creation
 /// failures are reported but do not change the function's exit status — the
@@ -119,7 +121,7 @@ async fn execute_with_agent<A: Agent + 'static>(
         (Some(s), _) => {
             if s.aborted {
                 bail!(
-                    "run {} was folded; remove .pitboss/state.json to start over",
+                    "run {} was folded; remove .pitboss/play/state.json to start over",
                     s.run_id
                 );
             }
@@ -133,7 +135,7 @@ async fn execute_with_agent<A: Agent + 'static>(
         }
         (None, StartMode::Resume) => {
             bail!(
-                "no run to rebuy: .pitboss/state.json is empty; use `pitboss play` to start a fresh run"
+                "no run to rebuy: .pitboss/play/state.json is empty; use `pitboss play` to start a fresh run"
             );
         }
     };
@@ -245,13 +247,13 @@ where
 }
 
 fn load_plan(workspace: &Path) -> Result<Plan> {
-    let path = workspace.join("plan.md");
+    let path = paths::plan_path(workspace);
     let text = fs::read_to_string(&path).with_context(|| format!("run: reading {:?}", path))?;
     plan::parse(&text).with_context(|| format!("run: parsing {:?}", path))
 }
 
 fn load_deferred(workspace: &Path) -> Result<DeferredDoc> {
-    let path = workspace.join("deferred.md");
+    let path = paths::deferred_path(workspace);
     match fs::read_to_string(&path) {
         Ok(text) => {
             if text.trim().is_empty() {

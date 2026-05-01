@@ -1,0 +1,51 @@
+---
+source: src/grind/dry_run.rs
+assertion_line: 348
+expression: report
+---
+=== pitboss grind --dry-run ===
+version: 1
+
+## Workspace
+
+- path: /tmp/empty
+- agent backend: (default)
+- resume target: (latest)
+
+## Prompts
+
+_No prompts discovered._
+
+## Plan
+
+- name: default
+- max_parallel: 1
+- consecutive_failure_limit: 3
+- entries: 0
+
+## Budgets
+
+- max_iterations: (unset)
+- until: (unset)
+- max_tokens: (unset)
+- max_cost_usd: (unset)
+
+## Hooks
+
+- pre_session: (unset)
+- post_session: (unset)
+- on_failure: (unset)
+
+## Scheduler preview
+
+Next 10 picks (frontmatter rules + plan overrides):
+   1. (no eligible prompt this rotation)
+   2. (no eligible prompt this rotation)
+   3. (no eligible prompt this rotation)
+   4. (no eligible prompt this rotation)
+   5. (no eligible prompt this rotation)
+   6. (no eligible prompt this rotation)
+   7. (no eligible prompt this rotation)
+   8. (no eligible prompt this rotation)
+   9. (no eligible prompt this rotation)
+  10. (no eligible prompt this rotation)

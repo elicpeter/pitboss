@@ -1,0 +1,62 @@
+---
+source: src/grind/dry_run.rs
+expression: report
+---
+=== pitboss grind --dry-run ===
+version: 1
+
+## Workspace
+
+- path: /tmp/fixture-workspace
+- agent backend: claude_code
+- resume target: 20260430T180000Z-rsm1
+
+## Resume
+
+- last_session_seq: 3
+- scheduler_rotation: 3
+- iterations_consumed: 3
+- tokens_consumed: 6000 (input=4000, output=2000)
+- cost_consumed_usd: $1.2345
+- consecutive_failures: 0
+
+## Prompts
+
+- alpha (source=project, weight=2, every=1, max_runs=(unset), verify=false, parallel_safe=false)
+- bravo (source=project, weight=1, every=1, max_runs=(unset), verify=false, parallel_safe=false)
+
+## Plan
+
+- name: fixture-plan
+- max_parallel: 2
+- consecutive_failure_limit: 3
+- entries: 2
+  - alpha (weight_override=(unset), every_override=(unset), max_runs_override=(unset))
+  - bravo (weight_override=(unset), every_override=(unset), max_runs_override=(unset))
+
+## Budgets
+
+- max_iterations: 50
+- until: (unset)
+- max_tokens: (unset)
+- max_cost_usd: $12.5000
+
+## Hooks
+
+- pre_session: `./pre.sh`
+- post_session: (unset)
+- on_failure: `./fail.sh`
+
+## Scheduler preview
+
+Next 10 picks (resumed scheduler state):
+   1. alpha
+   2. bravo
+   3. alpha
+   4. alpha
+   5. bravo
+   6. alpha
+   7. alpha
+   8. bravo
+   9. alpha
+  10. alpha

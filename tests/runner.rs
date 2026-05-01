@@ -151,10 +151,10 @@ const EMPTY_DEFERRED: &str = "## Deferred items\n\n## Deferred phases\n";
 
 fn make_workspace(plan_text: &str, deferred_text: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
-    fs::write(dir.path().join("plan.md"), plan_text).unwrap();
-    fs::write(dir.path().join("deferred.md"), deferred_text).unwrap();
-    fs::create_dir_all(dir.path().join(".pitboss/snapshots")).unwrap();
-    fs::create_dir_all(dir.path().join(".pitboss/logs")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/play/snapshots")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/play/logs")).unwrap();
+    fs::write(dir.path().join(".pitboss/play/plan.md"), plan_text).unwrap();
+    fs::write(dir.path().join(".pitboss/play/deferred.md"), deferred_text).unwrap();
     dir
 }
 
@@ -265,7 +265,7 @@ async fn run_advances_through_three_phase_plan() {
         "summary: {summary:?}"
     );
 
-    let plan_after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+    let plan_after = fs::read_to_string(dir.path().join(".pitboss/play/plan.md")).unwrap();
     let plan = plan::parse(&plan_after).expect("plan still parses");
     assert_eq!(
         plan.current_phase.as_str(),
@@ -304,7 +304,7 @@ async fn halts_on_plan_tamper_and_restores_snapshot() {
 
     let bogus_plan = "---\ncurrent_phase: \"99\"\n---\n\n# Phase 99: bogus\n";
     let agent = ScriptedAgent::new(vec![
-        Script::default().write("plan.md", bogus_plan.as_bytes())
+        Script::default().write(".pitboss/play/plan.md", bogus_plan.as_bytes())
     ]);
     let (mut runner, _g) = build_runner(
         dir.path(),
@@ -324,7 +324,7 @@ async fn halts_on_plan_tamper_and_restores_snapshot() {
         other => panic!("expected halt, got {other:?}"),
     }
 
-    let plan_after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+    let plan_after = fs::read_to_string(dir.path().join(".pitboss/play/plan.md")).unwrap();
     assert_eq!(
         plan_after, ONE_PHASE_PLAN,
         "plan.md must be byte-for-byte restored after tamper"
@@ -344,7 +344,7 @@ async fn halts_on_invalid_deferred_and_restores() {
 
     let bad_deferred = "## Garbage\n\n- not valid\n";
     let agent = ScriptedAgent::new(vec![
-        Script::default().write("deferred.md", bad_deferred.as_bytes())
+        Script::default().write(".pitboss/play/deferred.md", bad_deferred.as_bytes())
     ]);
     let (mut runner, _g) = build_runner(
         dir.path(),
@@ -367,7 +367,7 @@ async fn halts_on_invalid_deferred_and_restores() {
         other => panic!("expected halt, got {other:?}"),
     }
 
-    let deferred_after = fs::read_to_string(dir.path().join("deferred.md")).unwrap();
+    let deferred_after = fs::read_to_string(dir.path().join(".pitboss/play/deferred.md")).unwrap();
     assert_eq!(
         deferred_after, EMPTY_DEFERRED,
         "deferred.md must be restored after parse failure"
@@ -422,7 +422,7 @@ async fn advances_with_no_commit_when_only_deferred_changed() {
 
     let new_deferred = "## Deferred items\n\n- [ ] open item from agent\n\n## Deferred phases\n";
     let agent = ScriptedAgent::new(vec![
-        Script::default().write("deferred.md", new_deferred.as_bytes())
+        Script::default().write(".pitboss/play/deferred.md", new_deferred.as_bytes())
     ]);
     let (mut runner, _g) = build_runner(
         dir.path(),
@@ -443,7 +443,7 @@ async fn advances_with_no_commit_when_only_deferred_changed() {
     );
 
     // Deferred sweep keeps the unchecked item in place.
-    let deferred = fs::read_to_string(dir.path().join("deferred.md")).unwrap();
+    let deferred = fs::read_to_string(dir.path().join(".pitboss/play/deferred.md")).unwrap();
     assert!(
         deferred.contains("open item from agent"),
         "open item must survive sweep; got: {deferred:?}"
@@ -469,7 +469,7 @@ async fn mixed_changes_with_plan_tamper_halts_before_commit() {
     let bogus_plan = "---\ncurrent_phase: \"99\"\n---\n\n# Phase 99: bogus\n";
     let agent = ScriptedAgent::new(vec![Script::default()
         .write("src/foo.rs", b"// real change\n")
-        .write("plan.md", bogus_plan.as_bytes())]);
+        .write(".pitboss/play/plan.md", bogus_plan.as_bytes())]);
     let (mut runner, _g) = build_runner(
         dir.path(),
         ONE_PHASE_PLAN,
@@ -489,7 +489,7 @@ async fn mixed_changes_with_plan_tamper_halts_before_commit() {
     }
 
     // plan.md restored despite mixed changes.
-    let plan_after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+    let plan_after = fs::read_to_string(dir.path().join(".pitboss/play/plan.md")).unwrap();
     assert_eq!(plan_after, ONE_PHASE_PLAN);
     // src/foo.rs remains in the working tree (we only revert the planning artifacts).
     assert!(dir.path().join("src/foo.rs").exists());
@@ -564,7 +564,7 @@ async fn fixer_succeeds_on_attempt_2_and_phase_commits() {
     );
 
     // Per-attempt fixer logs land at the spec'd path.
-    let logs_dir = dir.path().join(".pitboss/logs");
+    let logs_dir = dir.path().join(".pitboss/play/logs");
     assert!(
         logs_dir.join("phase-01-fix-1.log").exists(),
         "phase-01-fix-1.log must exist after first fixer attempt"
@@ -641,7 +641,7 @@ async fn fixer_exhausts_retries_then_halts_with_tests_failed() {
     }
 
     // Both fixer attempt logs exist even though the loop exhausted.
-    let logs_dir = dir.path().join(".pitboss/logs");
+    let logs_dir = dir.path().join(".pitboss/play/logs");
     assert!(logs_dir.join("phase-01-fix-1.log").exists());
     assert!(logs_dir.join("phase-01-fix-2.log").exists());
 
@@ -761,7 +761,7 @@ async fn auditor_inlines_small_fix_and_commits_combined_diff() {
     // Audit log written under the conventional path.
     assert!(
         dir.path()
-            .join(".pitboss/logs/phase-01-audit-1.log")
+            .join(".pitboss/play/logs/phase-01-audit-1.log")
             .exists(),
         "phase-01-audit-1.log must exist after the auditor pass"
     );
@@ -801,7 +801,7 @@ async fn auditor_defers_large_finding_to_deferred_md() {
     let agent = ScriptedAgent::new(vec![
         Script::default().write("src/lib.rs", b"// implementer\n"),
         // Auditor only appends to deferred.md; no code changes.
-        Script::default().write("deferred.md", auditor_deferred.as_bytes()),
+        Script::default().write(".pitboss/play/deferred.md", auditor_deferred.as_bytes()),
     ]);
 
     let (mut runner, _g) =
@@ -819,7 +819,7 @@ async fn auditor_defers_large_finding_to_deferred_md() {
     assert_eq!(phase_commits.len(), 1, "log:\n{log:?}");
 
     // Auditor's deferred item survived the sweep (it's unchecked).
-    let deferred_after = fs::read_to_string(dir.path().join("deferred.md")).unwrap();
+    let deferred_after = fs::read_to_string(dir.path().join(".pitboss/play/deferred.md")).unwrap();
     assert!(
         deferred_after.contains("auditor: refactor the foo module"),
         "deferred.md after run:\n{deferred_after}"
@@ -839,7 +839,7 @@ async fn auditor_skipped_when_implementer_only_touched_planning_artifacts() {
 
     let new_deferred = "## Deferred items\n\n- [ ] open item\n\n## Deferred phases\n";
     let agent = ScriptedAgent::new(vec![
-        Script::default().write("deferred.md", new_deferred.as_bytes())
+        Script::default().write(".pitboss/play/deferred.md", new_deferred.as_bytes())
     ]);
 
     let (mut runner, _g) = build_runner(

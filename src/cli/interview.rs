@@ -18,6 +18,7 @@ use crate::agent::{Agent, AgentEvent, AgentRequest, Role, StopReason};
 use crate::config::Config;
 use crate::prompts;
 use crate::style::{self, col};
+use crate::util::paths;
 
 /// Wall-clock cap for the question-generation dispatch. Question generation is
 /// a short text-only task; 5 minutes is generous.
@@ -49,8 +50,8 @@ pub async fn conduct<A: Agent>(
         col(c, style::MAGENTA, "generating design questions...")
     );
 
-    std::fs::create_dir_all(workspace.join(".pitboss/logs"))
-        .context("interview: creating logs dir")?;
+    let logs_dir = paths::play_logs_dir(workspace);
+    std::fs::create_dir_all(&logs_dir).context("interview: creating logs dir")?;
 
     let prompt = prompts::questioner(goal, repo_summary, max_questions);
     let request = AgentRequest {
@@ -59,8 +60,9 @@ pub async fn conduct<A: Agent>(
         system_prompt: prompts::caveman::system_prompt(&cfg.caveman),
         user_prompt: prompt,
         workdir: workspace.to_path_buf(),
-        log_path: workspace.join(".pitboss/logs/questioner.log"),
+        log_path: logs_dir.join("questioner.log"),
         timeout: QUESTIONER_TIMEOUT,
+        env: std::collections::HashMap::new(),
     };
 
     let raw = dispatch_questioner(agent, request)

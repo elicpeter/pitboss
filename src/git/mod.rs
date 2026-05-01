@@ -23,16 +23,18 @@ use std::path::Path;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::plan::PhaseId;
 
 pub use mock::{MockGit, MockOp};
-pub use pr::{pr_body, pr_title, PrSummary};
+pub use pr::{grind_pr_title, open_grind_pr, pr_body, pr_title, PrSummary};
 pub use shell::ShellGit;
 
 /// A git commit hash (full SHA-1 hex from `git rev-parse HEAD`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct CommitId(String);
 
 impl CommitId {
@@ -139,6 +141,16 @@ pub trait Git: Send + Sync {
     /// empty string.
     async fn staged_diff(&self) -> Result<String>;
 
+    /// Stash any uncommitted changes (including untracked files) into a stash
+    /// labeled `message`, optionally restricting the stash to paths *outside*
+    /// `exclude` via `:!<path>` pathspecs. Returns `true` when something was
+    /// actually stashed, `false` when the working tree had nothing to capture.
+    /// Used by the grind runner to preserve an agent's leftover edits at
+    /// session end so they survive into a morning triage rather than being
+    /// discarded — while keeping pitboss's own bookkeeping under `.pitboss/`
+    /// out of the stash.
+    async fn stash_push(&self, message: &str, exclude: &[&Path]) -> Result<bool>;
+
     /// Open a pull request via `gh pr create` for the current branch.
     ///
     /// Returns the URL `gh` prints on stdout (e.g.,
@@ -148,6 +160,29 @@ pub trait Git: Send + Sync {
     /// `gh pr create` with `--fill-first`-equivalent metadata via `--title`
     /// and `--body` so the call is non-interactive.
     async fn open_pr(&self, title: &str, body: &str) -> Result<String>;
+
+    /// Create a new worktree at `path` and check out a fresh `branch` off
+    /// `base_branch`. Used by the grind parallel runner so each parallel
+    /// session can commit in isolation without contending for the main
+    /// workspace's index.
+    async fn add_worktree(&self, path: &Path, branch: &str, base_branch: &str) -> Result<()>;
+
+    /// Remove the worktree at `path` and its administrative bookkeeping.
+    /// Best-effort — succeeds when the worktree is already gone so callers
+    /// can use this both as the happy-path teardown and as a forensics
+    /// quarantine cleanup.
+    async fn remove_worktree(&self, path: &Path) -> Result<()>;
+
+    /// Force-delete a branch, even when it is not merged anywhere. Used by
+    /// the parallel runner to drop ephemeral session branches once their
+    /// commits have been folded back onto the run branch.
+    async fn delete_branch(&self, branch: &str) -> Result<()>;
+
+    /// `git merge --ff-only <source>` against the currently checked-out
+    /// branch. Errors when a true merge would be required so the caller can
+    /// surface a clear "parallel_safe contract violated" message instead of
+    /// silently producing a merge commit.
+    async fn merge_ff_only(&self, source_branch: &str) -> Result<()>;
 }
 
 /// Build a per-run branch name from a prefix and a UTC timestamp.

@@ -2,7 +2,7 @@
 //!
 //! Phase 15 wires the planner role end to end:
 //!
-//! 1. The CLI loads `pitboss.toml` to pick the planner model.
+//! 1. The CLI loads `.pitboss/config.toml` to pick the planner model.
 //! 2. A short repo overview is collected (top-level entries, package
 //!    manifests, top-level READMEs) and threaded into [`prompts::planner`].
 //! 3. The configured [`Agent`] is dispatched once. `Stdout` events are
@@ -34,7 +34,7 @@ use crate::config::{self, Config};
 use crate::plan;
 use crate::prompts;
 use crate::style::{self, col};
-use crate::util::write_atomic;
+use crate::util::{paths, write_atomic};
 
 /// Wall-clock cap for a single planner dispatch. The planner runs once per
 /// `pitboss plan` invocation (twice on the parse-failure retry path) so a
@@ -114,7 +114,7 @@ pub async fn run(workspace: PathBuf, goal: String, force: bool, interview: bool)
 /// Test-friendly entry point that accepts any [`Agent`]. Tests pass a
 /// `DryRunAgent` whose stdout script holds canned plan.md bodies; production
 /// passes whatever backend [`agent::build_agent`] selected from
-/// `pitboss.toml`.
+/// `config.toml`.
 ///
 /// `cfg` and `repo_summary` are threaded in by the caller so the workspace is
 /// not loaded or walked twice on the interview path. Callers that don't have
@@ -127,7 +127,7 @@ pub async fn run_with_agent<A: Agent>(
     repo_summary: &str,
     agent: &A,
 ) -> Result<PlanRunOutcome> {
-    let plan_path = workspace.join("plan.md");
+    let plan_path = paths::plan_path(workspace);
     if plan_path.exists() && !force && !is_init_seed(&plan_path)? {
         bail!(
             "plan.md already exists at {}; pass --force to overwrite",
@@ -167,6 +167,7 @@ pub async fn run_with_agent<A: Agent>(
             workdir: workspace.to_path_buf(),
             log_path,
             timeout: PLANNER_TIMEOUT,
+            env: std::collections::HashMap::new(),
         };
 
         let body = dispatch_planner(agent, request).await?;
@@ -330,14 +331,11 @@ fn is_init_seed(path: &Path) -> Result<bool> {
 }
 
 fn planner_log_path(workspace: &Path, attempt: u32) -> PathBuf {
-    workspace
-        .join(".pitboss")
-        .join("logs")
-        .join(format!("planner-attempt-{attempt}.log"))
+    paths::play_logs_dir(workspace).join(format!("planner-attempt-{attempt}.log"))
 }
 
 fn ensure_logs_dir(workspace: &Path) -> Result<()> {
-    let logs = workspace.join(".pitboss").join("logs");
+    let logs = paths::play_logs_dir(workspace);
     fs::create_dir_all(&logs).with_context(|| format!("plan: creating {}", logs.display()))?;
     Ok(())
 }
@@ -548,8 +546,8 @@ current_phase: \"01\"
             .unwrap();
 
         assert_eq!(outcome.attempts, 1);
-        assert_eq!(outcome.plan_path, dir.path().join("plan.md"));
-        let written = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        assert_eq!(outcome.plan_path, paths::plan_path(dir.path()));
+        let written = fs::read_to_string(paths::plan_path(dir.path())).unwrap();
         assert_eq!(written, CANNED_PLAN);
     }
 
@@ -557,7 +555,8 @@ current_phase: \"01\"
     async fn refuses_to_overwrite_existing_plan_without_force() {
         let dir = tempdir().unwrap();
         let preexisting = "preexisting plan body\n";
-        fs::write(dir.path().join("plan.md"), preexisting).unwrap();
+        fs::create_dir_all(paths::play_dir(dir.path())).unwrap();
+        fs::write(paths::plan_path(dir.path()), preexisting).unwrap();
 
         let agent = dry_agent_emitting(CANNED_PLAN);
         let (cfg, summary) = plan_inputs(dir.path());
@@ -566,7 +565,7 @@ current_phase: \"01\"
             .unwrap_err();
 
         assert!(err.to_string().contains("--force"), "err: {err}");
-        let after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        let after = fs::read_to_string(paths::plan_path(dir.path())).unwrap();
         assert_eq!(
             after, preexisting,
             "plan.md must be untouched without --force"
@@ -579,8 +578,9 @@ current_phase: \"01\"
         // first-run flow. The init-seeded `plan.md` must be replaced
         // silently — requiring `--force` here was a UX bug.
         let dir = tempdir().unwrap();
+        fs::create_dir_all(paths::play_dir(dir.path())).unwrap();
         fs::write(
-            dir.path().join("plan.md"),
+            paths::plan_path(dir.path()),
             crate::cli::init::PLAN_TEMPLATE.as_bytes(),
         )
         .unwrap();
@@ -592,7 +592,7 @@ current_phase: \"01\"
             .unwrap();
 
         assert_eq!(outcome.attempts, 1);
-        let written = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        let written = fs::read_to_string(paths::plan_path(dir.path())).unwrap();
         assert_eq!(written, CANNED_PLAN);
     }
 
@@ -604,7 +604,8 @@ current_phase: \"01\"
         let dir = tempdir().unwrap();
         let mut edited = crate::cli::init::PLAN_TEMPLATE.to_string();
         edited.push_str("\nuser added a note here\n");
-        fs::write(dir.path().join("plan.md"), edited.as_bytes()).unwrap();
+        fs::create_dir_all(paths::play_dir(dir.path())).unwrap();
+        fs::write(paths::plan_path(dir.path()), edited.as_bytes()).unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
         let (cfg, summary) = plan_inputs(dir.path());
 
@@ -612,14 +613,15 @@ current_phase: \"01\"
             .await
             .unwrap_err();
         assert!(err.to_string().contains("--force"), "err: {err}");
-        let after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        let after = fs::read_to_string(paths::plan_path(dir.path())).unwrap();
         assert_eq!(after, edited, "edited plan.md must be untouched");
     }
 
     #[tokio::test]
     async fn force_flag_overwrites_existing_plan() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("plan.md"), b"old content\n").unwrap();
+        fs::create_dir_all(paths::play_dir(dir.path())).unwrap();
+        fs::write(paths::plan_path(dir.path()), b"old content\n").unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
         let (cfg, summary) = plan_inputs(dir.path());
 
@@ -628,7 +630,7 @@ current_phase: \"01\"
             .unwrap();
 
         assert_eq!(outcome.attempts, 1);
-        let written = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        let written = fs::read_to_string(paths::plan_path(dir.path())).unwrap();
         assert_eq!(written, CANNED_PLAN);
     }
 
@@ -646,7 +648,7 @@ current_phase: \"01\"
             .await
             .unwrap();
         assert_eq!(outcome.attempts, 2);
-        let written = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+        let written = fs::read_to_string(paths::plan_path(dir.path())).unwrap();
         assert_eq!(written, CANNED_PLAN);
     }
 
@@ -667,7 +669,7 @@ current_phase: \"01\"
             "expected a parse-failure summary, got: {msg}"
         );
         assert!(
-            !dir.path().join("plan.md").exists(),
+            !paths::plan_path(dir.path()).exists(),
             "plan.md must not be written on consecutive parse failures"
         );
     }
@@ -683,20 +685,20 @@ current_phase: \"01\"
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("boom"));
-        assert!(!dir.path().join("plan.md").exists());
+        assert!(!paths::plan_path(dir.path()).exists());
     }
 
     #[tokio::test]
     async fn writes_per_attempt_log_paths_under_dot_pitboss() {
-        // The runner pre-creates `.pitboss/logs/`. After a single attempt the
-        // dir exists even if the agent didn't write the log itself (DryRun).
+        // The runner pre-creates `.pitboss/play/logs/`. After a single attempt
+        // the dir exists even if the agent didn't write the log itself (DryRun).
         let dir = tempdir().unwrap();
         let agent = dry_agent_emitting(CANNED_PLAN);
         let (cfg, summary) = plan_inputs(dir.path());
         let _ = run_with_agent(dir.path(), "g", false, &cfg, &summary, &agent)
             .await
             .unwrap();
-        assert!(dir.path().join(".pitboss/logs").is_dir());
+        assert!(paths::play_logs_dir(dir.path()).is_dir());
     }
 
     #[test]

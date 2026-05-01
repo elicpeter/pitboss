@@ -33,7 +33,7 @@ pub async fn run(workspace: PathBuf, checkout_original: bool) -> Result<()> {
     {
         Some(s) => s,
         None => bail!(
-            "no active run to fold: .pitboss/state.json is empty in {:?}",
+            "no active run to fold: .pitboss/play/state.json is empty in {:?}",
             workspace
         ),
     };

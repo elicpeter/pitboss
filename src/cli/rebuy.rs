@@ -1,4 +1,4 @@
-//! `pitboss rebuy` — buy back into a halted run from `.pitboss/state.json`.
+//! `pitboss rebuy` — buy back into a halted run from `.pitboss/play/state.json`.
 //!
 //! Rebuy reuses the runner driver from [`crate::cli::play::execute`] with
 //! [`StartMode::Resume`], so the only behavioral delta from `pitboss play`
