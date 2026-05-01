@@ -12,6 +12,7 @@
 
 pub mod budget;
 pub mod discovery;
+pub mod dry_run;
 pub mod hooks;
 pub mod plan;
 pub mod prompt;
@@ -28,6 +29,10 @@ pub use budget::{
 };
 pub use discovery::{
     discover_prompts, resolve_home_prompts_dir, DiscoveryOptions, DiscoveryResult,
+};
+pub use dry_run::{
+    preview_picks, render_dry_run_report, DryRunInputs, DRY_RUN_HEADER, DRY_RUN_VERSION,
+    PREVIEW_PICK_COUNT,
 };
 pub use hooks::{run_hook, HookKind, HookOutcome};
 pub use plan::{

@@ -29,7 +29,7 @@ use thiserror::Error;
 use crate::plan::PhaseId;
 
 pub use mock::{MockGit, MockOp};
-pub use pr::{pr_body, pr_title, PrSummary};
+pub use pr::{grind_pr_title, open_grind_pr, pr_body, pr_title, PrSummary};
 pub use shell::ShellGit;
 
 /// A git commit hash (full SHA-1 hex from `git rev-parse HEAD`).

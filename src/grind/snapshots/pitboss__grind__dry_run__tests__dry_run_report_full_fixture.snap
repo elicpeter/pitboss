@@ -1,0 +1,55 @@
+---
+source: src/grind/dry_run.rs
+assertion_line: 324
+expression: report
+---
+=== pitboss grind --dry-run ===
+version: 1
+
+## Workspace
+
+- path: /tmp/fixture-workspace
+- agent backend: claude_code
+
+## Prompts
+
+- alpha (source=project, weight=2, every=1, max_runs=(unset), verify=false, parallel_safe=false)
+- bravo (source=project, weight=1, every=1, max_runs=(unset), verify=false, parallel_safe=false)
+- charlie (source=project, weight=1, every=3, max_runs=(unset), verify=false, parallel_safe=false)
+
+## Plan
+
+- name: fixture-plan
+- max_parallel: 2
+- consecutive_failure_limit: 3
+- entries: 3
+  - alpha (weight_override=(unset), every_override=(unset), max_runs_override=(unset))
+  - bravo (weight_override=(unset), every_override=(unset), max_runs_override=(unset))
+  - charlie (weight_override=(unset), every_override=(unset), max_runs_override=(unset))
+
+## Budgets
+
+- max_iterations: 50
+- until: 2026-04-30T23:59:00Z
+- max_tokens: 1000000
+- max_cost_usd: $12.5000
+
+## Hooks
+
+- pre_session: `./pre.sh`
+- post_session: (unset)
+- on_failure: `./fail.sh`
+
+## Scheduler preview
+
+Next 10 picks (frontmatter rules + plan overrides):
+   1. alpha
+   2. bravo
+   3. charlie
+   4. alpha
+   5. alpha
+   6. bravo
+   7. alpha
+   8. alpha
+   9. charlie
+  10. bravo

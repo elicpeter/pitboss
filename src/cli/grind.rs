@@ -12,10 +12,11 @@
 //! documented [`crate::grind::ExitCode`] policy.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::Args;
 use tokio::signal;
@@ -23,12 +24,12 @@ use tracing::{info, warn};
 
 use crate::agent::{self, Agent};
 use crate::config::{self, Config};
-use crate::git::{Git, ShellGit};
+use crate::git::{self, Git, ShellGit};
 use crate::grind::{
-    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, resolve_budgets,
-    resolve_target, run_branch_name, validate_resume, DiscoveryOptions, ExitCode, GrindPlan,
-    GrindRunner, GrindShutdown, GrindStopReason, PlanBudgets, PromptDoc, ResumeError, RunDir,
-    RunListing, SessionRecord, SessionStatus,
+    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, render_dry_run_report,
+    resolve_budgets, resolve_target, run_branch_name, validate_resume, DiscoveryOptions,
+    DryRunInputs, ExitCode, GrindPlan, GrindRunner, GrindShutdown, GrindStopReason, PlanBudgets,
+    PromptDoc, ResumeError, RunDir, RunListing, SessionRecord, SessionStatus,
 };
 use crate::style::{self, col};
 
@@ -45,12 +46,18 @@ pub struct GrindArgs {
     /// (`./.pitboss/prompts/`) and global (`~/.pitboss/prompts/`) sources.
     #[arg(long = "prompts-dir")]
     pub prompts_dir: Option<PathBuf>,
-    /// Resolve and print the planned rotation, then exit without dispatching
-    /// any agents or creating a run directory. Phase 12 fleshes this out;
-    /// Phase 07 prints a one-paragraph summary so users can sanity-check the
-    /// resolved configuration before kicking off a long run.
+    /// Resolve the rotation, print a deterministic dry-run report (discovered
+    /// prompts and sources, plan, budgets, hooks, parallelism cap, expected
+    /// scheduler picks), then exit without dispatching any agents, creating a
+    /// run directory, or touching git.
     #[arg(long = "dry-run")]
     pub dry_run: bool,
+    /// On a successful run (exit code 0), open a pull request via
+    /// `gh pr create` for the per-run branch. Title is
+    /// `grind/<plan>: <run-id>`; body is the run's `sessions.md` verbatim.
+    /// Mirrors `pitboss play --pr`.
+    #[arg(long)]
+    pub pr: bool,
     /// Stop after this many sessions have been dispatched. Overrides
     /// `[grind.budgets] max_iterations` from `pitboss.toml` and the plan's
     /// `PlanBudgets`.
@@ -119,7 +126,30 @@ pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
     }
 
     if args.dry_run {
-        print_dry_run_summary(&workspace, &config, &plan, &prompts)?;
+        // Resolve the same budget layering the real run would, so the report
+        // surfaces the budgets the runner *would* enforce — not just what was
+        // declared in any one source.
+        let cli_budgets = PlanBudgets {
+            max_iterations: args.max_iterations,
+            until: args.until,
+            max_tokens: args.max_tokens,
+            max_cost_usd: args.max_cost,
+        };
+        let budgets = resolve_budgets(&config.grind.budgets, &plan.budgets, &cli_budgets);
+        let inputs = DryRunInputs {
+            workspace: &workspace,
+            agent_backend: config.agent.backend.as_deref(),
+            prompts: &prompts,
+            plan: &plan,
+            budgets: &budgets,
+            consecutive_failure_limit: config.grind.consecutive_failure_limit,
+            resume_target: args.resume.as_deref(),
+        };
+        let report = render_dry_run_report(&inputs);
+        let stdout = std::io::stdout();
+        let mut h = stdout.lock();
+        h.write_all(report.as_bytes())
+            .context("grind: writing dry-run report to stdout")?;
         return Ok(ExitCode::Success);
     }
 
@@ -188,6 +218,7 @@ where
 
     let prompts_map = into_lookup(prompts);
     let runner_git = ShellGit::new(workspace.clone());
+    let plan_name = plan.name.clone();
     let mut runner = GrindRunner::new(
         workspace.clone(),
         config,
@@ -220,7 +251,15 @@ where
         outcome.sessions.len(),
     );
 
-    Ok(classify_outcome(&outcome.stop_reason, &outcome.sessions))
+    let exit = classify_outcome(&outcome.stop_reason, &outcome.sessions);
+    if args.pr && exit == ExitCode::Success {
+        let pr_git = ShellGit::new(workspace.clone());
+        match open_post_run_grind_pr(&pr_git, &workspace, &outcome.run_id, &plan_name).await {
+            Ok(url) => announce_pr_opened(&url),
+            Err(e) => announce_pr_failed(&e),
+        }
+    }
+    Ok(exit)
 }
 
 async fn execute_resume<A>(
@@ -304,6 +343,7 @@ where
 
     let prompts_map = into_lookup(prompts);
     let runner_git = ShellGit::new(workspace.clone());
+    let plan_name = plan.name.clone();
     let RunListing {
         run_id,
         state_path: _,
@@ -345,7 +385,15 @@ where
         outcome.sessions.len(),
     );
 
-    Ok(classify_outcome(&outcome.stop_reason, &outcome.sessions))
+    let exit = classify_outcome(&outcome.stop_reason, &outcome.sessions);
+    if args.pr && exit == ExitCode::Success {
+        let pr_git = ShellGit::new(workspace.clone());
+        match open_post_run_grind_pr(&pr_git, &workspace, &outcome.run_id, &plan_name).await {
+            Ok(url) => announce_pr_opened(&url),
+            Err(e) => announce_pr_failed(&e),
+        }
+    }
+    Ok(exit)
 }
 
 fn render_resume_error(e: &ResumeError) -> String {
@@ -535,45 +583,46 @@ fn print_failed_to_start(message: &str) {
     );
 }
 
-fn print_dry_run_summary(
+/// Open a pull request for a finished grind run via [`git::open_grind_pr`].
+/// Public so the integration test crate can exercise it against a `MockGit`.
+/// On failure the error is reported but does not change the run's exit code —
+/// the grind run already succeeded; PR creation is the post-step.
+pub async fn open_post_run_grind_pr<G: Git + ?Sized>(
+    git: &G,
     workspace: &Path,
-    config: &Config,
-    plan: &GrindPlan,
-    prompts: &[PromptDoc],
-) -> Result<()> {
+    run_id: &str,
+    plan_name: &str,
+) -> Result<String> {
+    let sessions_md_path = workspace
+        .join(".pitboss")
+        .join("grind")
+        .join(run_id)
+        .join("sessions.md");
+    let sessions_md = fs::read_to_string(&sessions_md_path).with_context(|| {
+        format!(
+            "grind --pr: reading {} for PR body",
+            sessions_md_path.display()
+        )
+    })?;
+    git::open_grind_pr(git, plan_name, run_id, &sessions_md).await
+}
+
+fn announce_pr_opened(url: &str) {
+    let c = style::use_color_stdout();
     let stdout = std::io::stdout();
     let mut h = stdout.lock();
-    writeln!(h, "# pitboss grind --dry-run")?;
-    writeln!(h, "workspace: {}", workspace.display())?;
-    writeln!(
+    let _ = writeln!(
         h,
-        "agent backend: {}",
-        config
-            .agent
-            .backend
-            .as_deref()
-            .unwrap_or("claude_code (default)")
-    )?;
-    writeln!(h, "plan: {}", plan.name)?;
-    writeln!(h, "prompts: {}", prompts.len())?;
-    for p in prompts {
-        writeln!(
-            h,
-            "  - {} (weight={}, every={}, verify={}, source={:?})",
-            p.meta.name, p.meta.weight, p.meta.every, p.meta.verify, p.source_kind
-        )?;
-    }
-    writeln!(h, "plan entries: {}", plan.prompts.len())?;
-    for entry in &plan.prompts {
-        writeln!(
-            h,
-            "  - {} (weight_override={:?}, every_override={:?}, max_runs_override={:?})",
-            entry.name, entry.weight_override, entry.every_override, entry.max_runs_override
-        )?;
-    }
-    if plan.prompts.is_empty() {
-        return Err(anyhow!("grind --dry-run: plan has no prompt entries"));
-    }
-    writeln!(h, "max_parallel: {}", plan.max_parallel)?;
-    Ok(())
+        "{} opened PR: {}",
+        col(c, style::BOLD_CYAN, "[pitboss]"),
+        col(c, style::CYAN, url)
+    );
+}
+
+fn announce_pr_failed(err: &anyhow::Error) {
+    let c = style::use_color_stderr();
+    eprintln!(
+        "{} PR creation failed: {err:#}",
+        col(c, style::BOLD_RED, "[pitboss]"),
+    );
 }
