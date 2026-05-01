@@ -11,6 +11,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -192,10 +194,7 @@ fn staleness_config() -> Config {
     c.audit.enabled = false;
     c.sweep.audit_enabled = false;
     c.sweep.trigger_min_items = 1;
-    // Phase 08's trailing drain loop fires after the final phase if any
-    // unchecked item remains. These tests count sweeps that fire between
-    // phases; the drain is covered in `tests/sweep_final_loop.rs`.
-    c.sweep.final_sweep_enabled = false;
+    common::disable_final_sweep(&mut c);
     // Default escalate_after = 3 stays — the tests reason about that value.
     c
 }
@@ -457,7 +456,6 @@ async fn escalation_event_fires_only_once_on_threshold_cross() {
 /// re-arming `pending_sweep`.
 #[tokio::test]
 async fn escalation_event_does_not_refire_on_subsequent_increment() {
-    use pitboss::state;
     use tokio::sync::broadcast::error::RecvError;
 
     let initial = deferred_items_only(&[("alpha", false), ("beta", false)]);
@@ -503,90 +501,38 @@ async fn escalation_event_does_not_refire_on_subsequent_increment() {
     for _ in 0..6 {
         let _ = runner.run_phase().await.unwrap();
     }
-    // Sanity: counters now at 3 and the events fired.
-    let mid_state = pitboss::state::load(dir.path()).unwrap().expect("state");
-    assert_eq!(mid_state.deferred_item_attempts.get("alpha").copied(), Some(3));
+    // Sanity: counters now at 3 and the threshold-cross events fired during
+    // sweep 3.
+    assert_eq!(
+        runner.state().deferred_item_attempts.get("alpha").copied(),
+        Some(3)
+    );
 
-    // Force a 4th sweep by re-arming pending_sweep without an intervening
-    // phase commit. Persist via state::save so run_phase reads it on entry.
-    {
-        let raw = pitboss::state::load(dir.path()).unwrap().expect("state");
-        let mut next = raw;
-        next.pending_sweep = true;
-        // consecutive_sweeps stays under max_consecutive=5 so the gate fires.
-        state::save(dir.path(), Some(&next)).unwrap();
-    }
-    // Update the runner's in-memory state too — the runner caches it.
-    // Easiest: drop and rebuild the runner from disk. But we have no helper
-    // for that here. Instead trust that pending_sweep is read live from
-    // self.state at the top of run_phase_inner — but it's `self.state`,
-    // which is set at construction and only mutated in-process. Since the
-    // disk save we just did is invisible to this runner, we instead set
-    // `pending_sweep` on the runner via running another phase first then
-    // letting the natural flow re-trip it. Simpler: drop the runner and
-    // rebuild from the persisted state.
+    // Force a 4th sweep by re-arming pending_sweep in-memory via the
+    // test-only `state_mut` accessor — no filesystem round-trip, no runner
+    // rebuild. The runner persists on the next save anyway.
+    runner.state_mut().pending_sweep = true;
+    // consecutive_sweeps stays under max_consecutive=5 so the gate fires.
+
+    // The agent's queue still holds the remaining 2 scripts (sweep 4 + phase
+    // 04 impl) from the initial `ScriptedAgent::new` call.
+    runner.run().await.unwrap();
     drop(runner);
+    let stale_events = collector.await.unwrap();
 
-    // Rebuild the runner with the freshly-persisted state. The agent
-    // continues from where it left off because we reuse the script queue
-    // through a fresh agent — but ScriptedAgent owns its queue, so re-using
-    // means we need to construct one with the remaining 2 scripts.
-    let remaining_agent = ScriptedAgent::new(vec![
-        // sweep 4: no-op (counters tick to 4; no fresh threshold cross).
-        Script::default(),
-        // phase 04 impl.
-        Script::default().write("src/p4.rs", b"// 4\n"),
-    ]);
-
-    let cfg2 = {
-        let mut c = staleness_config();
-        c.sweep.max_consecutive = 5;
-        c
-    };
-    let loaded_state = pitboss::state::load(dir.path()).unwrap().expect("state");
-    // The cached plan object on disk has current_phase advanced; load it.
-    let plan_on_disk = std::fs::read_to_string(dir.path().join(".pitboss/play/plan.md")).unwrap();
-    let plan_loaded = plan::parse(&plan_on_disk).unwrap();
-    let deferred_on_disk =
-        std::fs::read_to_string(dir.path().join(".pitboss/play/deferred.md")).unwrap();
-    let deferred_loaded = pitboss::deferred::parse(&deferred_on_disk).unwrap();
-
-    let runner_git = ShellGit::new(dir.path());
-    let mut runner2 = Runner::new(
-        dir.path().to_path_buf(),
-        cfg2,
-        plan_loaded,
-        deferred_loaded,
-        loaded_state,
-        remaining_agent,
-        runner_git,
+    // Sweep 3 emitted both alpha and beta at attempts=3; sweep 4 must not
+    // re-emit either despite the counter incrementing to 4.
+    assert_eq!(
+        stale_events.len(),
+        2,
+        "expected exactly 2 stale events (alpha + beta from sweep 3); got {stale_events:?}"
     );
-
-    // Subscribe a fresh receiver — older events are still queued on the old
-    // collector, so just collect new ones from this runner.
-    let mut rx2 = runner2.subscribe();
-    let collector2 = tokio::spawn(async move {
-        let mut stale: Vec<(String, u32)> = Vec::new();
-        loop {
-            match rx2.recv().await {
-                Ok(Event::DeferredItemStale { text, attempts }) => stale.push((text, attempts)),
-                Ok(_) => {}
-                Err(RecvError::Lagged(_)) => {}
-                Err(RecvError::Closed) => break,
-            }
-        }
-        stale
-    });
-
-    runner2.run().await.unwrap();
-    drop(runner2);
-    let stale_after_4 = collector2.await.unwrap();
-    let _initial = collector.await.unwrap();
-
-    assert!(
-        stale_after_4.is_empty(),
-        "items already at/above escalate_after must not re-emit — got {stale_after_4:?}"
-    );
+    for (_, attempts) in &stale_events {
+        assert_eq!(
+            *attempts, 3,
+            "stale events must report the threshold-crossing attempts value (3), not the post-sweep-4 value: {stale_events:?}"
+        );
+    }
 
     let final_state = pitboss::state::load(dir.path()).unwrap().expect("state");
     assert_eq!(
@@ -676,17 +622,11 @@ async fn stale_items_capped_at_ten_and_sorted_by_attempts() {
     init_git_repo(dir.path());
 
     let agent = ScriptedAgent::new(vec![Script::default().write("src/p1.rs", b"// 1\n")]);
-    let mut cfg = staleness_config();
-    // Disable sweeps entirely so we only build the runner; we manipulate
-    // state directly afterward.
-    cfg.sweep.enabled = false;
-    let runner = build_runner(dir.path(), TWO_PHASE_PLAN, &initial, cfg, agent).await;
+    let cfg = staleness_config();
+    let mut runner = build_runner(dir.path(), TWO_PHASE_PLAN, &initial, cfg, agent).await;
 
-    // Hand-populate `state.deferred_item_attempts`. We can't mutate the
-    // private state directly, so write to disk and rebuild the runner.
-    let mut state = runner.state().clone();
-    drop(runner);
-
+    // Hand-populate `deferred_item_attempts` directly via the test-only
+    // `state_mut` accessor — no filesystem round-trip, no runner rebuild.
     let mut attempts_map: HashMap<String, u32> = HashMap::new();
     // 15 items, all at the same attempts=4 (above escalate_after=3).
     for i in 0..15 {
@@ -694,30 +634,9 @@ async fn stale_items_capped_at_ten_and_sorted_by_attempts() {
     }
     // One additional item at attempts=10 — must be the first entry returned.
     attempts_map.insert("topdog".to_string(), 10);
-    state.deferred_item_attempts = attempts_map;
-    pitboss::state::save(dir.path(), Some(&state)).unwrap();
+    runner.state_mut().deferred_item_attempts = attempts_map;
 
-    // Rebuild the runner so it picks up the persisted state.
-    let agent = ScriptedAgent::new(vec![]);
-    let plan_obj = plan::parse(TWO_PHASE_PLAN).unwrap();
-    let deferred_obj = pitboss::deferred::parse(&initial).unwrap();
-    let loaded = pitboss::state::load(dir.path()).unwrap().expect("state");
-    let runner2 = Runner::new(
-        dir.path().to_path_buf(),
-        {
-            let mut c = Config::default();
-            c.sweep.enabled = true;
-            c.sweep.escalate_after = 3;
-            c
-        },
-        plan_obj,
-        deferred_obj,
-        loaded,
-        agent,
-        ShellGit::new(dir.path()),
-    );
-
-    let stale = runner2.stale_items();
+    let stale = runner.stale_items();
     assert_eq!(
         stale.len(),
         runner::STALE_ITEMS_PROMPT_CAP,

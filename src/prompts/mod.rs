@@ -173,17 +173,17 @@ pub fn fixer_with_deferred(
 /// previous sweeps. Empty slice renders a `(none)` marker.
 /// The auditor's contract is "for each resolved item, does the diff actually
 /// do that work? revert anything unrelated."
-#[allow(clippy::too_many_arguments)]
-pub fn sweep_auditor(
-    _plan: &Plan,
-    deferred: &DeferredDoc,
-    after: &PhaseId,
-    diff: &str,
-    resolved: &[String],
-    remaining: &[String],
-    stale_items: &[StaleItem],
-    small_fix_line_limit: usize,
-) -> String {
+pub fn sweep_auditor(input: SweepAuditorPrompt<'_>) -> String {
+    let SweepAuditorPrompt {
+        plan: _,
+        deferred,
+        after,
+        diff,
+        resolved,
+        remaining,
+        stale_items,
+        small_fix_line_limit,
+    } = input;
     let limit = small_fix_line_limit.to_string();
     let resolved_block = render_audit_item_list(resolved);
     let remaining_block = render_audit_item_list(remaining);
@@ -200,6 +200,25 @@ pub fn sweep_auditor(
             ("small_fix_line_limit", &limit),
         ],
     )
+}
+
+/// Bundled inputs for [`sweep_auditor`]. Grouped into a struct so the renderer
+/// reads at the call site as named fields rather than a long positional list,
+/// and so the `small_fix_line_limit` field can match
+/// [`crate::config::AuditConfig::small_fix_line_limit`]'s `u32` without a cast.
+#[derive(Debug, Clone, Copy)]
+pub struct SweepAuditorPrompt<'a> {
+    /// Plan threaded through for parity with the phase auditor; today the
+    /// renderer does not consume it directly, but a future template revision
+    /// might want plan-level context (overall goal, prior-phase summaries).
+    pub plan: &'a Plan,
+    pub deferred: &'a DeferredDoc,
+    pub after: &'a PhaseId,
+    pub diff: &'a str,
+    pub resolved: &'a [String],
+    pub remaining: &'a [String],
+    pub stale_items: &'a [StaleItem],
+    pub small_fix_line_limit: u32,
 }
 
 /// Render an item-list block for the sweep auditor prompt. Empty slice maps to
@@ -897,9 +916,16 @@ mod sweep {
             "tighten test for empty deferred.md".to_string(),
             "document sweep section in README".to_string(),
         ];
-        let out = sweep_auditor(
-            &plan, &deferred, &after, diff, &resolved, &remaining, &[], 25,
-        );
+        let out = sweep_auditor(SweepAuditorPrompt {
+            plan: &plan,
+            deferred: &deferred,
+            after: &after,
+            diff,
+            resolved: &resolved,
+            remaining: &remaining,
+            stale_items: &[],
+            small_fix_line_limit: 25,
+        });
         assert!(out.contains("polish error message in PhaseId::parse"));
         assert!(out.contains("rename `flag` to `enabled` in audit config"));
         assert!(out.contains("Most recently completed phase: 02"));
@@ -921,16 +947,16 @@ mod sweep {
             text: "polish error message in PhaseId::parse".into(),
             attempts: 4,
         }];
-        let out = sweep_auditor(
-            &plan,
-            &deferred,
-            &after,
-            "(empty diff)",
-            &[],
-            &[],
-            &stale,
-            25,
-        );
+        let out = sweep_auditor(SweepAuditorPrompt {
+            plan: &plan,
+            deferred: &deferred,
+            after: &after,
+            diff: "(empty diff)",
+            resolved: &[],
+            remaining: &[],
+            stale_items: &stale,
+            small_fix_line_limit: 25,
+        });
         assert!(
             out.contains("Stale items"),
             "expected stale items section header in output:\n{out}"
@@ -946,16 +972,16 @@ mod sweep {
         let plan = fixture_plan();
         let deferred = fixture_deferred();
         let after = pid("02");
-        let out = sweep_auditor(
-            &plan,
-            &deferred,
-            &after,
-            "(empty diff)",
-            &[],
-            &[],
-            &[],
-            30,
-        );
+        let out = sweep_auditor(SweepAuditorPrompt {
+            plan: &plan,
+            deferred: &deferred,
+            after: &after,
+            diff: "(empty diff)",
+            resolved: &[],
+            remaining: &[],
+            stale_items: &[],
+            small_fix_line_limit: 30,
+        });
         // Empty resolved/remaining/stale each render with a `(none)` marker.
         assert!(
             out.matches("(none)").count() >= 3,
@@ -978,9 +1004,16 @@ mod sweep {
             "tighten test for empty deferred.md".to_string(),
             "document sweep section in README".to_string(),
         ];
-        insta::assert_snapshot!(sweep_auditor(
-            &plan, &deferred, &after, diff, &resolved, &remaining, &[], 30
-        ));
+        insta::assert_snapshot!(sweep_auditor(SweepAuditorPrompt {
+            plan: &plan,
+            deferred: &deferred,
+            after: &after,
+            diff,
+            resolved: &resolved,
+            remaining: &remaining,
+            stale_items: &[],
+            small_fix_line_limit: 30,
+        }));
     }
 
     #[test]

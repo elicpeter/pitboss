@@ -1,6 +1,6 @@
 ---
 source: src/prompts/mod.rs
-expression: "sweep_auditor(&plan, &deferred, &after, diff, &resolved, &remaining, &[], 30)"
+expression: "sweep_auditor(SweepAuditorPrompt {\n    plan: &plan,\n    deferred: &deferred,\n    after: &after,\n    diff,\n    resolved: &resolved,\n    remaining: &remaining,\n    stale_items: &[],\n    small_fix_line_limit: 30,\n})"
 ---
 You are the auditor agent for pitboss. The implementer just ran a deferred-sweep dispatch — there is no `plan.md` phase to anchor on. Your job is to verify that the staged diff actually does the work the implementer claimed and that nothing unrelated snuck into the commit.
 

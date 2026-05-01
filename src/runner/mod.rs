@@ -60,6 +60,13 @@ const AGENT_EVENT_CHANNEL_CAPACITY: usize = 64;
 /// not more agent passes.
 pub const STALE_ITEMS_PROMPT_CAP: usize = 10;
 
+/// Cap on the number of stale items each operator-facing surface (the TUI
+/// stale panel, `pitboss status`) renders before truncating with a
+/// `+N more` footer. Lower than [`STALE_ITEMS_PROMPT_CAP`] because vertical
+/// real estate on the operator's screen is tighter than the auditor's
+/// prompt budget.
+pub const STALE_ITEMS_DISPLAY_CAP: usize = 5;
+
 /// Why the runner stopped advancing the plan.
 ///
 /// Each variant carries enough context for the CLI logger (and the eventual
@@ -467,6 +474,21 @@ impl<A: Agent, G: Git> Runner<A, G> {
         &self.state
     }
 
+    /// Mutable handle to the cached run state.
+    ///
+    /// Test-only escape hatch (kept `pub` so integration tests can reach it;
+    /// `#[cfg(test)]` would only expose it to in-crate unit tests). A few
+    /// sweep tests need to seed a multi-step scenario by mutating the run
+    /// state between runner operations — re-arming `pending_sweep` to force
+    /// an extra sweep, or hand-populating the `deferred_item_attempts` map.
+    /// Without this accessor they had to round-trip through `state::save`
+    /// + drop runner + `Runner::new`, replumbing plan / deferred / agent /
+    /// git by hand.
+    #[doc(hidden)]
+    pub fn state_mut(&mut self) -> &mut RunState {
+        &mut self.state
+    }
+
     /// Borrow the loaded config. Used by the TUI to populate the agent /
     /// per-role model header chip.
     pub fn config(&self) -> &Config {
@@ -648,10 +670,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
             self.state.pending_sweep = true;
             state::save(&self.workspace, Some(&self.state))
                 .context("runner: persisting pending_sweep for final-sweep iter")?;
-            let after_clone = after.clone();
-            let result = self
-                .run_sweep_step_inner(after_clone.clone(), Some(after_clone), None)
-                .await?;
+            let result = self.run_sweep_step(after.clone()).await?;
             match result {
                 PhaseResult::Halted { reason, .. } => {
                     // `pending_sweep` stays true on the halt path so a resume
@@ -749,13 +768,16 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 // first phase commits (a `--sweep` on a fresh run), there
                 // is nothing to anchor on, so accounting falls back to the
                 // plan's current phase and the prompt label renders the
-                // standalone "no preceding phase" variant.
-                let prompt_after = self.state.completed.last().cloned();
-                let accounting = prompt_after
-                    .clone()
-                    .unwrap_or_else(|| self.plan.current_phase.clone());
+                // standalone "no preceding phase" variant. The fresh-run
+                // case is the only place a sweep dispatches with
+                // `prompt_after = None`, so it stays on `run_sweep_step_inner`
+                // directly; the common case routes through the named
+                // [`Runner::run_sweep_step`] wrapper.
+                if let Some(prompt_after) = self.state.completed.last().cloned() {
+                    return self.run_sweep_step(prompt_after).await;
+                }
                 return self
-                    .run_sweep_step_inner(accounting, prompt_after, None)
+                    .run_sweep_step_inner(self.plan.current_phase.clone(), None, None)
                     .await;
             } else {
                 self.state.pending_sweep = false;
@@ -1072,6 +1094,19 @@ impl<A: Agent, G: Git> Runner<A, G> {
             .clone()
             .unwrap_or_else(|| self.plan.current_phase.clone());
         self.run_sweep_step_inner(accounting, after, max_items).await
+    }
+
+    /// Dispatch one sweep anchored on `after`. Common-case wrapper around
+    /// [`Runner::run_sweep_step_inner`] that fixes `prompt_after = Some(after)`
+    /// and `max_items = None` — the natural defaults for both the inter-phase
+    /// gate (when there is at least one completed phase to anchor on) and
+    /// phase 08's final-sweep drain loop. Bespoke entry points that need
+    /// either knob ([`Runner::run_standalone_sweep`] for `max_items`, the
+    /// fresh-run path inside `run_phase_inner` for `prompt_after = None`)
+    /// continue to call `run_sweep_step_inner` directly.
+    async fn run_sweep_step(&mut self, after: PhaseId) -> Result<PhaseResult> {
+        self.run_sweep_step_inner(after.clone(), Some(after), None)
+            .await
     }
 
     /// Shared body of the inter-phase sweep gate (in
@@ -1572,16 +1607,16 @@ impl<A: Agent, G: Git> Runner<A, G> {
                     .collect();
                 let stale = self.stale_items();
                 (
-                    prompts::sweep_auditor(
-                        &self.plan,
-                        &self.deferred,
-                        &after,
-                        &diff,
-                        &resolved,
-                        &remaining,
-                        &stale,
-                        self.config.audit.small_fix_line_limit as usize,
-                    ),
+                    prompts::sweep_auditor(prompts::SweepAuditorPrompt {
+                        plan: &self.plan,
+                        deferred: &self.deferred,
+                        after: &after,
+                        diff: &diff,
+                        resolved: &resolved,
+                        remaining: &remaining,
+                        stale_items: &stale,
+                        small_fix_line_limit: self.config.audit.small_fix_line_limit,
+                    }),
                     // Sweep audits get a sweep-prefix log path so an operator
                     // scanning `.pitboss/play/logs/` can tell sweep audits
                     // apart from regular phase audits at a glance.

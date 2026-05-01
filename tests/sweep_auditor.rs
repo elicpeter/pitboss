@@ -8,6 +8,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -195,10 +197,7 @@ fn git_show_files(dir: &Path, commit: &str) -> Vec<String> {
 /// default), with the trigger set so 5 unchecked items trip a sweep.
 fn audit_full_enabled() -> Config {
     let mut c = Config::default();
-    // Phase 08's trailing drain loop is covered in `sweep_final_loop.rs`;
-    // these tests assert the audit-on between-phase flow with exact sweep
-    // counts, so opt out of the drain.
-    c.sweep.final_sweep_enabled = false;
+    common::disable_final_sweep(&mut c);
     c
 }
 

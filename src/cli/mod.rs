@@ -14,8 +14,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::grind::ExitCode;
-
+pub mod exit_code;
 pub mod fold;
 pub mod grind;
 pub mod init;
@@ -26,6 +25,8 @@ pub mod prompts;
 pub mod rebuy;
 pub mod status;
 pub mod sweep;
+
+pub use exit_code::ExitCode;
 
 #[derive(Debug, Parser)]
 #[command(

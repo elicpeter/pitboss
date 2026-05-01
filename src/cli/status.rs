@@ -24,10 +24,10 @@ use crate::runner::{self, sweep::unchecked_count};
 use crate::state::{self, RunState};
 use crate::util::paths;
 
-/// Maximum number of stale items to render in `pitboss status`. Past this
-/// the list balloons without adding signal — the report is a snapshot, not
-/// a triage tool.
-const STALE_DISPLAY_CAP: usize = 5;
+// Maximum number of stale items to render in `pitboss status`. Shared with
+// the TUI stale panel via [`crate::runner::STALE_ITEMS_DISPLAY_CAP`] so the
+// two operator surfaces stay in lockstep.
+use crate::runner::STALE_ITEMS_DISPLAY_CAP as STALE_DISPLAY_CAP;
 
 /// Top-level entry point for the `status` subcommand. Prints to stdout.
 pub fn run(workspace: PathBuf) -> Result<()> {

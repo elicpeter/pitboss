@@ -62,10 +62,10 @@ const STATS_HEIGHT: u16 = 10;
 /// something to show.
 const STALE_HEIGHT: u16 = 7;
 
-/// Cap on the number of stale items rendered in the panel. Past this, the
-/// panel adds a "+N more" line so the operator knows the list overflowed
-/// rather than being silently truncated.
-const STALE_PANEL_CAP: usize = 5;
+// Cap on the number of stale items rendered in the panel. Shared with
+// `pitboss status` via [`crate::runner::STALE_ITEMS_DISPLAY_CAP`] so the two
+// operator surfaces stay in lockstep; both add a "+N more" footer past this.
+use crate::runner::STALE_ITEMS_DISPLAY_CAP as STALE_PANEL_CAP;
 
 /// Slice of [`crate::config::Config`] needed to price running token usage in
 /// the session-stats panel. Built by [`crate::tui::run`] from the runner's

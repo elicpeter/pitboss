@@ -9,6 +9,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -190,10 +192,7 @@ fn audit_disabled() -> Config {
     let mut c = Config::default();
     c.audit.enabled = false;
     c.sweep.audit_enabled = false;
-    // Phase 08's trailing drain loop is covered in `sweep_final_loop.rs`;
-    // these tests assert exact sweep counts/skips in the between-phase
-    // position, so opt out of the drain.
-    c.sweep.final_sweep_enabled = false;
+    common::disable_final_sweep(&mut c);
     c
 }
 

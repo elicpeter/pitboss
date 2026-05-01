@@ -36,7 +36,7 @@ use crate::agent::{self, Agent, AgentEvent};
 use crate::config;
 use crate::deferred::{self, DeferredDoc};
 use crate::git::{Git, ShellGit};
-use crate::grind::ExitCode;
+use crate::cli::ExitCode;
 use crate::plan::{self, PhaseId, Plan};
 use crate::runner::{self, PhaseResult, Runner};
 use crate::state::{self, TokenUsage};
@@ -180,10 +180,9 @@ async fn execute_with_agent<A: Agent + 'static>(
     match outcome? {
         PhaseResult::Halted { phase_id, reason } => {
             eprintln!("[pitboss] sweep halted at phase {phase_id}: {reason}");
-            // Reuse the grind exit-code enum's "1" slot. The sweep command
-            // doesn't have a dedicated exit-code surface, so the closest
-            // semantic match is "something failed but the runner kept its
-            // composure."
+            // The shared `ExitCode` enum's `MixedFailures` slot is the
+            // documented "exit 1 / operation failed" code; sweep reuses it
+            // here per the enum's module-level note.
             Ok(ExitCode::MixedFailures)
         }
         PhaseResult::Advanced { .. } => Ok(ExitCode::Success),
