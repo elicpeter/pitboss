@@ -166,6 +166,11 @@ pub struct AuditContext {
 /// Streaming events the runner broadcasts to subscribers. Sends are
 /// best-effort: a lagging or absent subscriber never blocks the runner.
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(strum::EnumDiscriminants))]
+#[cfg_attr(
+    test,
+    strum_discriminants(name(EventDiscriminants), derive(strum::EnumIter, Hash))
+)]
 pub enum Event {
     /// A phase began. Emitted once per implementer dispatch — fixer
     /// re-dispatches inside the same phase emit [`Event::FixerStarted`] instead
@@ -579,12 +584,16 @@ impl<A: Agent, G: Git> Runner<A, G> {
     }
 
     /// True when state + plan describe "the final regular phase has committed
-    /// but `Runner::run` hasn't yet emitted [`Event::RunFinished`]". The plan
-    /// never advances `current_phase` past the last phase, so after a final
-    /// commit `state.completed.last() == plan.current_phase`. A halted phase
-    /// or sweep before the final commit lands does not satisfy this — its
-    /// `state.completed.last()` is the *previous* phase id.
+    /// but `Runner::run` hasn't yet emitted [`Event::RunFinished`]". The
+    /// authoritative signal is the persisted `state.post_final_phase` flag,
+    /// set when the final phase commits in [`Runner::run_phase_inner`]. The
+    /// fallback inference (`completed.last() == current_phase &&
+    /// next_phase_id_after(...).is_none()`) covers state files written by
+    /// builds that predate the explicit flag.
     fn is_post_final_phase_state(&self) -> bool {
+        if self.state.post_final_phase {
+            return true;
+        }
         let Some(last_completed) = self.state.completed.last() else {
             return false;
         };
@@ -762,23 +771,37 @@ impl<A: Agent, G: Git> Runner<A, G> {
                 ),
             };
             if allow {
-                self.deferred = parsed;
-                // For runs that have at least one completed phase, anchor
-                // the sweep on it. For a forced sweep before the very
-                // first phase commits (a `--sweep` on a fresh run), there
-                // is nothing to anchor on, so accounting falls back to the
-                // plan's current phase and the prompt label renders the
-                // standalone "no preceding phase" variant. The fresh-run
-                // case is the only place a sweep dispatches with
-                // `prompt_after = None`, so it stays on `run_sweep_step_inner`
-                // directly; the common case routes through the named
-                // [`Runner::run_sweep_step`] wrapper.
                 if let Some(prompt_after) = self.state.completed.last().cloned() {
-                    return self.run_sweep_step(prompt_after).await;
+                    self.deferred = parsed;
+                    let result = self.run_sweep_step(prompt_after).await?;
+                    if matches!(result, PhaseResult::Advanced { .. })
+                        && matches!(self.sweep_override, SweepOverride::Force)
+                    {
+                        // `--sweep` is a one-shot directive: fire one
+                        // forced sweep at the next inter-phase boundary.
+                        // After the sweep advances, demote the override so
+                        // subsequent post-phase triggers fall back to the
+                        // configured threshold logic and we don't sweep
+                        // between every pair of phases.
+                        self.sweep_override = SweepOverride::None;
+                    }
+                    return Ok(result);
                 }
-                return self
-                    .run_sweep_step_inner(self.plan.current_phase.clone(), None, None)
-                    .await;
+                // Fresh run + `--sweep` (the only path that lands here with
+                // `state.completed` empty): silently no-op. There is no
+                // completed phase to anchor on, so the sweep would dispatch
+                // with `prompt_after = None` against an empty history —
+                // operators don't expect "between phases" wording before the
+                // first phase has even started. Clear the obligation, log the
+                // skip for visibility, and fall through to phase 01.
+                tracing::info!(
+                    "skipping forced sweep: no completed phases yet to anchor on"
+                );
+                self.state.pending_sweep = false;
+                state::save(&self.workspace, Some(&self.state)).context(
+                    "runner: persisting state.json after fresh-run force-sweep no-op",
+                )?;
+                self.deferred = parsed;
             } else {
                 self.state.pending_sweep = false;
                 state::save(&self.workspace, Some(&self.state))
@@ -861,6 +884,12 @@ impl<A: Agent, G: Git> Runner<A, G> {
         self.state.consecutive_sweeps = 0;
 
         let next_phase = self.next_phase_id_after(&phase_id);
+        if next_phase.is_none() {
+            // Final regular phase just committed. Persist the flag so a
+            // subsequent `pitboss play` resume re-enters the final-sweep
+            // drain loop directly rather than re-running the phase.
+            self.state.post_final_phase = true;
+        }
         if let Some(ref next) = next_phase {
             self.plan.set_current_phase(next.clone());
             write_atomic(&plan_path, plan::serialize(&self.plan).as_bytes())
@@ -868,15 +897,19 @@ impl<A: Agent, G: Git> Runner<A, G> {
             // Only consider scheduling a between-phase sweep when there is a
             // next phase to insert it before. End-of-run sweeps (after the
             // final phase) belong to phase 08. `--no-sweep` suppresses
-            // arming entirely; `--sweep` is consumed by the gate above (and
-            // would already have fired by the time we get here), so the
-            // post-phase trigger reverts to the configured behavior.
+            // arming entirely; `--sweep` arms once and is consumed by the
+            // gate at the top of `run_phase_inner` after the sweep
+            // advances, so a multi-phase fresh run with `--sweep` fires
+            // its forced sweep at *this* boundary (between the just-
+            // committed first phase and the next), then reverts to
+            // threshold-driven behavior for subsequent boundaries.
             if !matches!(self.sweep_override, SweepOverride::Skip)
-                && sweep::should_run_deferred_sweep(
-                    &self.deferred,
-                    &self.config.sweep,
-                    self.state.consecutive_sweeps,
-                )
+                && (matches!(self.sweep_override, SweepOverride::Force)
+                    || sweep::should_run_deferred_sweep(
+                        &self.deferred,
+                        &self.config.sweep,
+                        self.state.consecutive_sweeps,
+                    ))
             {
                 self.state.pending_sweep = true;
             }
@@ -1089,11 +1122,13 @@ impl<A: Agent, G: Git> Runner<A, G> {
         &mut self,
         after: Option<PhaseId>,
         max_items: Option<usize>,
+        persist_state: bool,
     ) -> Result<PhaseResult> {
         let accounting = after
             .clone()
             .unwrap_or_else(|| self.plan.current_phase.clone());
-        self.run_sweep_step_inner(accounting, after, max_items).await
+        self.run_sweep_step_inner(accounting, after, max_items, persist_state)
+            .await
     }
 
     /// Dispatch one sweep anchored on `after`. Common-case wrapper around
@@ -1105,7 +1140,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
     /// fresh-run path inside `run_phase_inner` for `prompt_after = None`)
     /// continue to call `run_sweep_step_inner` directly.
     async fn run_sweep_step(&mut self, after: PhaseId) -> Result<PhaseResult> {
-        self.run_sweep_step_inner(after.clone(), Some(after), None)
+        self.run_sweep_step_inner(after.clone(), Some(after), None, true)
             .await
     }
 
@@ -1134,6 +1169,7 @@ impl<A: Agent, G: Git> Runner<A, G> {
         accounting: PhaseId,
         prompt_after: Option<PhaseId>,
         max_items: Option<usize>,
+        persist_state: bool,
     ) -> Result<PhaseResult> {
         // Capture pre-sweep accounting. `pre_unchecked` drives the resolved
         // count for the commit message; `pre_texts` is threaded into
@@ -1164,11 +1200,13 @@ impl<A: Agent, G: Git> Runner<A, G> {
         };
 
         if let Some(reason) = self.check_budget() {
-            // A halt is not a free pass on the staleness clock — items still
-            // pending count against `escalate_after` even when the dispatch
-            // never ran. `self.deferred` is unchanged here, so survivors ==
-            // pre_texts.
-            self.apply_sweep_staleness(&pre_texts);
+            // Pre-dispatch budget halt — the agent never ran, so this halt
+            // doesn't tick the staleness clock. Combined with
+            // `state.pending_sweep` retrying the same logical sweep on
+            // resume, ticking here would double-count one operator-visible
+            // attempt: once for the budget halt, once for the resume's
+            // post-dispatch increment. Skipping it here keeps "one attempt
+            // per implementer dispatch" as the rule.
             return Ok(PhaseResult::Halted {
                 phase_id: accounting,
                 reason,
@@ -1303,8 +1341,16 @@ impl<A: Agent, G: Git> Runner<A, G> {
         // it. `current_phase` already advanced when the preceding phase
         // committed, so the runner picks the regular phase up on the next
         // `run_phase` call.
-        state::save(&self.workspace, Some(&self.state))
-            .context("runner: persisting state.json after sweep")?;
+        //
+        // `persist_state = false` is the standalone-sweep-on-fresh-workspace
+        // case: state was synthesized in memory and the caller doesn't want
+        // an empty run claiming the workspace by leaving a state.json
+        // behind. The runner skips the write so the CLI doesn't have to
+        // clean up after it.
+        if persist_state {
+            state::save(&self.workspace, Some(&self.state))
+                .context("runner: persisting state.json after sweep")?;
+        }
 
         let _ = self.events_tx.send(Event::SweepCompleted {
             after: accounting.clone(),

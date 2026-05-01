@@ -119,12 +119,16 @@ pub enum PhaseStatus {
 pub enum Activity {
     /// Run has not started dispatching agents yet.
     Idle,
-    /// Implementer dispatch is in flight.
+    /// Implementer dispatch for a regular phase is in flight.
     Implementer,
+    /// Implementer dispatch for a deferred-sweep step is in flight.
+    SweepImplementer,
     /// Fixer dispatch is in flight; carries the 1-based attempt index.
     Fixer(u32),
-    /// Auditor dispatch is in flight.
+    /// Auditor dispatch for a regular phase is in flight.
     Auditor,
+    /// Auditor dispatch for a deferred-sweep step is in flight.
+    SweepAuditor,
     /// Auditor was skipped because the staged diff was empty.
     AuditorSkipped,
     /// Test runner is active.
@@ -140,8 +144,10 @@ impl fmt::Display for Activity {
         match self {
             Activity::Idle => f.write_str("idle"),
             Activity::Implementer => f.write_str("implementer"),
+            Activity::SweepImplementer => f.write_str("sweep:implementer"),
             Activity::Fixer(n) => write!(f, "fixer (attempt {n})"),
             Activity::Auditor => f.write_str("auditor"),
+            Activity::SweepAuditor => f.write_str("sweep:auditor"),
             Activity::AuditorSkipped => f.write_str("auditor (skipped, no diff)"),
             Activity::Tests => f.write_str("running tests"),
             Activity::Done => f.write_str("finished"),
@@ -330,7 +336,10 @@ impl App {
             }
             Event::AuditorStarted { context, attempt } => {
                 self.attempts.insert(context.phase_id.clone(), attempt);
-                self.activity = Activity::Auditor;
+                self.activity = match context.kind {
+                    AuditContextKind::Phase => Activity::Auditor,
+                    AuditContextKind::Sweep => Activity::SweepAuditor,
+                };
                 if context.kind == AuditContextKind::Sweep {
                     if let Some(sweep) = self.sweep_state.as_mut() {
                         sweep.in_auditor = true;
@@ -408,9 +417,13 @@ impl App {
                         "tui: SweepStarted for phase {after} arrived without a preceding \
                          PhaseCommitted; rendering with the state we have"
                     );
+                    self.push_output(format!(
+                        "[tui:warn] SweepStarted({after}) without PhaseCommitted({after}); \
+                         event stream out of order"
+                    ));
                 }
                 self.attempts.insert(after.clone(), attempt);
-                self.activity = Activity::Implementer;
+                self.activity = Activity::SweepImplementer;
                 self.sweep_state = Some(SweepState {
                     after: after.clone(),
                     attempt,
@@ -430,8 +443,18 @@ impl App {
                         "tui: SweepCompleted for phase {after} arrived without a preceding \
                          SweepStarted; rendering with the state we have"
                     );
+                    self.push_output(format!(
+                        "[tui:warn] SweepCompleted({after}) without SweepStarted({after}); \
+                         event stream out of order"
+                    ));
                 }
                 self.sweep_state = None;
+                // The sweep has finished; clear the sweep-specific
+                // activity so the chip doesn't misleadingly read
+                // `[sweep:implementer]` while we wait for the next
+                // PhaseStarted / TestStarted / RunFinished. Idle is the
+                // accurate "between dispatches" state.
+                self.activity = Activity::Idle;
                 let line = match commit {
                     Some(c) => format!(
                         "[sweep] after {after}: {resolved} items resolved ({c})"
@@ -586,7 +609,9 @@ impl App {
     fn current_model(&self) -> &str {
         match &self.activity {
             Activity::Fixer(_) => &self.agent_display.fixer_model,
-            Activity::Auditor | Activity::AuditorSkipped => &self.agent_display.auditor_model,
+            Activity::Auditor | Activity::SweepAuditor | Activity::AuditorSkipped => {
+                &self.agent_display.auditor_model
+            }
             _ => &self.agent_display.implementer_model,
         }
     }
@@ -990,9 +1015,9 @@ fn status_style(s: &PhaseStatus) -> Style {
 fn activity_color(a: &Activity) -> Color {
     match a {
         Activity::Idle => Color::DarkGray,
-        Activity::Implementer => Color::Cyan,
+        Activity::Implementer | Activity::SweepImplementer => Color::Cyan,
         Activity::Fixer(_) => Color::Yellow,
-        Activity::Auditor | Activity::AuditorSkipped => Color::Blue,
+        Activity::Auditor | Activity::SweepAuditor | Activity::AuditorSkipped => Color::Blue,
         Activity::Tests => Color::Magenta,
         Activity::Done => Color::Green,
         Activity::Halted(_) => Color::Red,
@@ -1070,7 +1095,7 @@ mod tests {
     use super::*;
 
     use crate::plan::{Phase, PhaseId};
-    use crate::runner::AuditContext;
+    use crate::runner::{AuditContext, EventDiscriminants};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
@@ -1612,33 +1637,28 @@ mod tests {
         ]
     }
 
-    /// Compile-time-ish check that every `Event` variant is named. If a new
-    /// variant is added to the enum without being added here (and to
-    /// `one_of_each_event`), the `match` won't compile.
+    /// Structural exhaustiveness: every `Event` variant must appear in
+    /// `one_of_each_event()`. The set of discriminants iterated by
+    /// `EventDiscriminants::iter()` (generated by `strum::EnumDiscriminants`)
+    /// is the source of truth — adding a new variant to `Event` without
+    /// seeding it here trips this assertion at test time, replacing the
+    /// hand-maintained `match` that used to live here.
     #[test]
-    #[allow(dead_code, unused_variables)]
-    fn event_match_is_exhaustive() {
-        let event = Event::TestStarted;
-        match event {
-            Event::PhaseStarted { .. } => {}
-            Event::FixerStarted { .. } => {}
-            Event::AuditorStarted { .. } => {}
-            Event::AuditorSkippedNoChanges { .. } => {}
-            Event::AgentStdout(_) => {}
-            Event::AgentStderr(_) => {}
-            Event::AgentToolUse(_) => {}
-            Event::TestStarted => {}
-            Event::TestFinished { .. } => {}
-            Event::TestsSkipped => {}
-            Event::PhaseCommitted { .. } => {}
-            Event::PhaseHalted { .. } => {}
-            Event::RunFinished => {}
-            Event::UsageUpdated(_) => {}
-            Event::SweepStarted { .. } => {}
-            Event::SweepCompleted { .. } => {}
-            Event::SweepHalted { .. } => {}
-            Event::DeferredItemStale { .. } => {}
-        }
+    fn one_of_each_event_covers_every_variant() {
+        use std::collections::HashSet;
+        use strum::IntoEnumIterator;
+
+        let seeded: HashSet<EventDiscriminants> = one_of_each_event()
+            .iter()
+            .map(EventDiscriminants::from)
+            .collect();
+        let expected: HashSet<EventDiscriminants> = EventDiscriminants::iter().collect();
+
+        let missing: Vec<_> = expected.difference(&seeded).collect();
+        assert!(
+            missing.is_empty(),
+            "one_of_each_event() is missing variants: {missing:?}",
+        );
     }
 
     #[test]
@@ -1684,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_started_sets_sweep_state_and_implementer_activity() {
+    fn sweep_started_sets_sweep_state_and_sweep_implementer_activity() {
         let mut app = App::new(
             three_phase_plan(),
             fresh_state(),
@@ -1710,7 +1730,7 @@ mod tests {
         assert_eq!(sweep.after, pid("01"));
         assert_eq!(sweep.attempt, 2);
         assert!(!sweep.in_auditor);
-        assert_eq!(app.activity, Activity::Implementer);
+        assert_eq!(app.activity, Activity::SweepImplementer);
         assert_eq!(app.attempts.get(&pid("01")).copied(), Some(2));
     }
 
@@ -1737,7 +1757,7 @@ mod tests {
         });
         let sweep = app.sweep_state.clone().expect("sweep state set");
         assert!(sweep.in_auditor);
-        assert_eq!(app.activity, Activity::Auditor);
+        assert_eq!(app.activity, Activity::SweepAuditor);
     }
 
     #[test]
@@ -1865,7 +1885,10 @@ mod tests {
     fn out_of_order_sweep_completed_without_started_does_not_panic() {
         // Defensive: the runner should never emit SweepCompleted before
         // SweepStarted, but if it did (e.g., a desync from an external
-        // subscriber injecting events in tests), the App must not panic.
+        // subscriber injecting events in tests), the App must not panic
+        // and must surface a `[tui:warn]` line so the operator notices
+        // (the underlying tracing::debug is invisible under the alternate
+        // screen).
         let mut app = App::new(
             three_phase_plan(),
             fresh_state(),
@@ -1879,15 +1902,25 @@ mod tests {
             commit: None,
         });
         assert!(app.sweep_state.is_none());
-        let last = app.output.back().unwrap();
-        assert!(last.contains("0 items resolved"), "got: {last}");
+        let lines: Vec<String> = app.output_lines().cloned().collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[tui:warn] SweepCompleted(01) without SweepStarted(01)")),
+            "expected a [tui:warn] line; output was: {lines:?}",
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("0 items resolved")),
+            "expected resolved-count line; output was: {lines:?}",
+        );
     }
 
     #[test]
     fn out_of_order_sweep_started_without_phase_committed_does_not_panic() {
         // Defensive: a SweepStarted before any PhaseCommitted (or a fresh
-        // run with no completed phases) sets sweep_state without panicking;
-        // the renderer falls back to the supplied phase id.
+        // run with no completed phases) sets sweep_state without panicking,
+        // and surfaces a `[tui:warn]` line so the desync is visible at
+        // runtime instead of buried in `RUST_LOG`.
         let mut app = App::new(
             three_phase_plan(),
             fresh_state(),
@@ -1902,6 +1935,13 @@ mod tests {
         });
         let sweep = app.sweep_state.clone().expect("sweep state set");
         assert_eq!(sweep.after, pid("01"));
+        let lines: Vec<String> = app.output_lines().cloned().collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[tui:warn] SweepStarted(01) without PhaseCommitted(01)")),
+            "expected a [tui:warn] line; output was: {lines:?}",
+        );
     }
 
     fn sweep_after_first_phase_apparatus(now_offset_seconds: i64) -> App {

@@ -889,3 +889,86 @@ async fn halted_final_phase_skips_final_loop() {
         .iter()
         .any(|e| e == "PhaseHalted(01)"));
 }
+
+/// Hardening regression: the final-phase resume guard must fire on the
+/// explicit `state.post_final_phase` flag, not just on the inferred
+/// invariant `completed.last() == current_phase &&
+/// next_phase_id_after(...).is_none()`. We simulate a future runner
+/// change that advances `current_phase` past the final phase (today the
+/// runner doesn't, but the inference would silently break if it ever
+/// did) and assert resume still routes into the final-sweep loop and
+/// doesn't replay the final phase.
+#[tokio::test]
+async fn final_phase_commit_sets_post_final_phase_flag_and_resume_uses_it() {
+    let initial = deferred_items_only(&[("a", false)]);
+    let dir = make_workspace(ONE_PHASE_PLAN, &initial);
+    init_git_repo(dir.path());
+
+    let drained = deferred_items_only(&[("a", true)]);
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("src/phase_01.rs", b"// 1\n"),
+        Script::default()
+            .write(".pitboss/play/deferred.md", drained.as_bytes())
+            .write("src/sweep_marker.rs", b"// sweep\n"),
+    ]);
+    let mut runner = build_runner(
+        dir.path(),
+        ONE_PHASE_PLAN,
+        &initial,
+        final_loop_config(),
+        agent,
+    )
+    .await;
+    let summary = runner.run().await.unwrap();
+    assert!(matches!(summary, RunSummary::Finished));
+    drop(runner);
+
+    let state = pitboss::state::load(dir.path()).unwrap().expect("state");
+    assert!(
+        state.post_final_phase,
+        "final-phase commit must persist post_final_phase = true; state: {state:?}"
+    );
+
+    // Corrupt the inferred invariant: drop the final phase from completed.
+    // The explicit flag should still drive the resume guard. Without the
+    // flag, a future change to that invariant would silently re-run the
+    // final phase here.
+    let mut tampered = state.clone();
+    tampered.completed.clear();
+    pitboss::state::save(dir.path(), Some(&tampered)).unwrap();
+
+    let plan_obj = plan::parse(ONE_PHASE_PLAN).expect("parse plan");
+    let deferred_text = fs::read_to_string(dir.path().join(".pitboss/play/deferred.md")).unwrap();
+    let deferred = pitboss::deferred::parse(&deferred_text).unwrap();
+    let resume_state = pitboss::state::load(dir.path()).unwrap().expect("state");
+    // Resume must NOT re-dispatch the final phase. With the deferred file
+    // already drained (zero unchecked items), the final-sweep loop's
+    // `pre_unchecked == 0` short-circuit exits immediately and emits
+    // `RunFinished`.
+    let resume_agent = ScriptedAgent::new(vec![]);
+    let runner_git = ShellGit::new(dir.path());
+    let mut runner = Runner::new(
+        dir.path().to_path_buf(),
+        final_loop_config(),
+        plan_obj,
+        deferred,
+        resume_state,
+        resume_agent,
+        runner_git,
+    );
+    let rx = runner.subscribe();
+    let collector = tokio::spawn(collect_events(rx));
+    let summary = runner.run().await.unwrap();
+    assert!(matches!(summary, RunSummary::Finished));
+    drop(runner);
+
+    let events = collector.await.unwrap();
+    assert!(
+        !events.iter().any(|e| e.starts_with("PhaseStarted(")),
+        "resume with post_final_phase = true must not re-dispatch any phase; events: {events:?}",
+    );
+    assert!(
+        events.contains(&"RunFinished".to_string()),
+        "resume must finish cleanly; events: {events:?}",
+    );
+}

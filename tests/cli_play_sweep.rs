@@ -394,6 +394,155 @@ async fn sweep_override_forces_sweep_below_threshold() {
     );
 }
 
+/// `pitboss play --sweep` on a *single*-phase fresh run: the override
+/// arms `pending_sweep`, but the gate sees `state.completed` empty and
+/// silently no-ops instead of dispatching a sweep against an empty
+/// history. Phase 01 runs unscathed, no `SweepStarted` is emitted before
+/// the phase. (The final-sweep loop after phase 01 commits remains
+/// owned by phase 08 and is exercised separately.)
+#[tokio::test]
+async fn sweep_override_on_fresh_run_skips_pre_phase_sweep() {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let initial = deferred_items_only(&[("a", false), ("b", false)]);
+    let dir = make_workspace(ONE_PHASE_PLAN, &initial);
+    init_git_repo(dir.path());
+
+    let agent = ScriptedAgent::new(vec![
+        // Phase 01 implementer — the only dispatch we expect on this run.
+        Script::default().write("src/phase_01.rs", b"// 1\n"),
+    ]);
+
+    let mut config = audit_disabled();
+    config.sweep = SweepConfig {
+        trigger_min_items: 100,
+        trigger_max_items: 100,
+        ..config.sweep
+    };
+    let mut runner = build_runner(dir.path(), ONE_PHASE_PLAN, &initial, config, agent)
+        .await
+        .force_sweep(true);
+
+    let mut rx = runner.subscribe();
+    let collector = tokio::spawn(async move {
+        let mut events = Vec::new();
+        loop {
+            match rx.recv().await {
+                Ok(Event::SweepStarted { .. }) => events.push("SweepStarted".to_string()),
+                Ok(Event::PhaseStarted { phase_id, .. }) => {
+                    events.push(format!("PhaseStarted({phase_id})"))
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
+        }
+        events
+    });
+
+    runner.run_phase().await.unwrap();
+    drop(runner);
+    let events = collector.await.unwrap();
+
+    let phase_pos = events
+        .iter()
+        .position(|e| e == "PhaseStarted(01)")
+        .expect("phase 01 must start");
+    let pre_phase_sweep = events[..phase_pos]
+        .iter()
+        .any(|e| e == "SweepStarted");
+    assert!(
+        !pre_phase_sweep,
+        "fresh-run --sweep must not dispatch a sweep before phase 01; events: {events:?}",
+    );
+}
+
+/// On a multi-phase run, `--sweep` is one-shot: it fires exactly one
+/// forced sweep at the first inter-phase boundary, then reverts to the
+/// configured threshold logic. With a backlog below threshold, the gap
+/// between phase 02 and phase 03 must NOT see a second sweep — only the
+/// post-phase-01 forced sweep fires.
+#[tokio::test]
+async fn sweep_override_force_is_consumed_after_first_sweep() {
+    use tokio::sync::broadcast::error::RecvError;
+
+    const THREE_PHASE_PLAN: &str = "\
+---
+current_phase: \"01\"
+---
+
+# Pitboss Plan
+
+# Phase 01: First
+
+**Scope.** First.
+
+# Phase 02: Second
+
+**Scope.** Second.
+
+# Phase 03: Third
+
+**Scope.** Third.
+";
+
+    let initial = deferred_items_only(&[("a", false), ("b", false)]);
+    let dir = make_workspace(THREE_PHASE_PLAN, &initial);
+    init_git_repo(dir.path());
+
+    let post = deferred_items_only(&[("a", true), ("b", true)]);
+    let agent = ScriptedAgent::new(vec![
+        Script::default().write("src/phase_01.rs", b"// 1\n"),
+        Script::default()
+            .write(".pitboss/play/deferred.md", post.as_bytes())
+            .write("src/sweep_marker.rs", b"// sweep\n"),
+        Script::default().write("src/phase_02.rs", b"// 2\n"),
+        Script::default().write("src/phase_03.rs", b"// 3\n"),
+    ]);
+
+    let mut config = audit_disabled();
+    config.sweep = SweepConfig {
+        trigger_min_items: 100,
+        trigger_max_items: 100,
+        ..config.sweep
+    };
+    let mut runner = build_runner(dir.path(), THREE_PHASE_PLAN, &initial, config, agent)
+        .await
+        .force_sweep(true);
+
+    let mut rx = runner.subscribe();
+    let collector = tokio::spawn(async move {
+        let mut events = Vec::new();
+        loop {
+            match rx.recv().await {
+                Ok(Event::SweepStarted { after, .. }) => {
+                    events.push(format!("SweepStarted({after})"))
+                }
+                Ok(Event::PhaseStarted { phase_id, .. }) => {
+                    events.push(format!("PhaseStarted({phase_id})"))
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => break,
+            }
+        }
+        events
+    });
+
+    runner.run().await.unwrap();
+    drop(runner);
+    let events = collector.await.unwrap();
+
+    let sweep_count = events
+        .iter()
+        .filter(|e| e.starts_with("SweepStarted"))
+        .count();
+    assert_eq!(
+        sweep_count, 1,
+        "--sweep must fire exactly once on a multi-phase run; events: {events:?}",
+    );
+}
+
 // ---------- standalone sweep ----------
 
 /// `pitboss sweep`-style standalone invocation against a 7-item backlog:
@@ -425,7 +574,10 @@ async fn standalone_sweep_runs_without_advancing_plan() {
     )
     .await;
 
-    let result = runner.run_standalone_sweep(None, None).await.unwrap();
+    let result = runner
+        .run_standalone_sweep(None, None, true)
+        .await
+        .unwrap();
     assert!(
         matches!(
             result,
@@ -484,7 +636,7 @@ async fn standalone_sweep_max_items_clamps_prompt() {
     .await;
 
     runner
-        .run_standalone_sweep(None, Some(5))
+        .run_standalone_sweep(None, Some(5), true)
         .await
         .expect("sweep ran");
 
@@ -552,37 +704,32 @@ async fn standalone_sweep_halt_persists_pending_sweep() {
         agent,
     )
     .await;
-    // Mark pending_sweep to mirror an inherited obligation. The override
-    // matters less here — a clean sweep dispatch under halt still must
-    // re-arm pending_sweep on disk so an operator can rerun it.
-    {
-        // Direct field access isn't exposed; the standalone path triggers
-        // its own dispatch and the halt branch does NOT clear
-        // pending_sweep. So an inherited flag stays true; if the runner
-        // started with pending_sweep=false the halt path does not set it
-        // either. The phase 06 spec only requires "state.pending_sweep is
-        // left true on disk" for the halt case where the runner had
-        // pending_sweep set going in. We simulate that by serializing the
-        // current state with pending_sweep=true and re-loading.
-    }
+    // Seed `pending_sweep = true` so this test exercises the literal phase
+    // 06 spec line: a halted sweep with the obligation already armed must
+    // leave the flag true on disk for retry. Without seeding, the halt
+    // path only proves the flag isn't *set* — not that it isn't *cleared*.
+    runner.state_mut().pending_sweep = true;
 
-    let result = runner.run_standalone_sweep(None, None).await.unwrap();
+    let result = runner
+        .run_standalone_sweep(None, None, true)
+        .await
+        .unwrap();
     assert!(matches!(result, PhaseResult::Halted { .. }));
 
-    // The runner persisted state with the halt accounted for: pending_sweep
-    // remains whatever it was at entry (false here). Save it back for the
-    // CLI to cover the "halt leaves pending_sweep true" path: the CLI
-    // explicitly persists state on exit, so we mimic that here.
     let state_after = runner.state().clone();
     drop(runner);
 
+    // Mirror the CLI: persist on the halt path so a retry observes the
+    // armed obligation.
     pitboss::state::save(dir.path(), Some(&state_after)).unwrap();
     let reloaded = pitboss::state::load(dir.path()).unwrap().expect("state");
-    // Halted sweep means the deferred-item attempts counter ticked up for
-    // every survivor — that's the externally observable signal that a halt
-    // was recorded and the on-disk state is consistent for retry.
+
+    assert!(
+        reloaded.pending_sweep,
+        "halt path must leave state.pending_sweep = true on disk; got {reloaded:?}",
+    );
     assert!(
         !reloaded.deferred_item_attempts.is_empty(),
-        "halt path must record sweep-attempt counters for survivors"
+        "halt path must record sweep-attempt counters for survivors",
     );
 }

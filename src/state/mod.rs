@@ -143,6 +143,18 @@ pub struct RunState {
     /// gotcha.
     #[serde(default)]
     pub deferred_item_attempts: HashMap<String, u32>,
+    /// `true` once the final regular phase has committed. The runner uses
+    /// this as the resume guard for the final-sweep drain loop: a resume
+    /// that finds this flag set re-enters the loop directly instead of
+    /// dispatching the final phase a second time. Earlier builds inferred
+    /// the same condition from `state.completed.last() == plan.current_phase
+    /// && next_phase_id_after(...).is_none()`; that inference was reliable
+    /// because the runner never advanced `current_phase` past the final
+    /// phase, but the invariant lived nowhere in `RunState` and a future
+    /// change to that invariant would silently break resume. Storing the
+    /// flag explicitly removes the inference.
+    #[serde(default)]
+    pub post_final_phase: bool,
 }
 
 impl RunState {
@@ -165,6 +177,7 @@ impl RunState {
             pending_sweep: false,
             consecutive_sweeps: 0,
             deferred_item_attempts: HashMap::new(),
+            post_final_phase: false,
         }
     }
 }
@@ -222,6 +235,7 @@ mod tests {
             pending_sweep: false,
             consecutive_sweeps: 0,
             deferred_item_attempts,
+            post_final_phase: false,
         };
 
         let json = serde_json::to_string(&state).unwrap();

@@ -154,12 +154,19 @@ async fn execute_with_agent<A: Agent + 'static>(
     .skip_tests(dry_run);
 
     let logger = spawn_logger(&runner);
-    let outcome = runner.run_standalone_sweep(after, args.max_items).await;
+    let outcome = runner
+        .run_standalone_sweep(after, args.max_items, state_existed)
+        .await;
 
-    // The runner persists state.json itself on the success path. On the
-    // halt path we save here so a halted sweep can be retried.
-    if let Err(e) = state::save(&workspace, Some(runner.state())) {
-        eprintln!("[pitboss] failed to persist state.json after sweep: {e:#}");
+    // Persist state.json only when a real run is in flight. The runner
+    // honors `persist_state` on its success path; we mirror that on the
+    // halt path so a halted sweep can be retried. When `state_existed`
+    // is false the synthesized state was in-memory bookkeeping only and
+    // never touches disk.
+    if state_existed {
+        if let Err(e) = state::save(&workspace, Some(runner.state())) {
+            eprintln!("[pitboss] failed to persist state.json after sweep: {e:#}");
+        }
     }
 
     // Drop the runner so the broadcast channel closes and the logger
@@ -167,15 +174,6 @@ async fn execute_with_agent<A: Agent + 'static>(
     // logger only exits on channel close.
     drop(runner);
     let _ = logger.await;
-
-    if !state_existed {
-        // The synthesized fresh state was for in-memory bookkeeping only;
-        // unlink the file so subsequent `pitboss play` starts clean.
-        let path = state::state_path(&workspace);
-        if path.exists() {
-            let _ = fs::remove_file(&path);
-        }
-    }
 
     match outcome? {
         PhaseResult::Halted { phase_id, reason } => {

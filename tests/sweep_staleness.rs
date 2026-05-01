@@ -3,8 +3,11 @@
 //! Each test stands a workspace up against a real `git init`'d directory and
 //! drives the runner with a [`ScriptedAgent`] (the same shape sweep_smoke.rs
 //! and sweep_auditor.rs use). The runner's per-item attempt counter lives on
-//! `RunState::deferred_item_attempts` and is updated at every sweep exit —
-//! success, halt, and budget-skip alike. These tests exercise the counter
+//! `RunState::deferred_item_attempts` and is updated whenever the sweep's
+//! implementer dispatch actually ran — success and post-dispatch halts tick
+//! it; pre-dispatch budget halts (where the agent never ran) do not, so a
+//! budget-halted-then-resumed sweep counts as one operator-visible attempt
+//! rather than two. These tests exercise the counter
 //! transitions, the `Event::DeferredItemStale` emission, the
 //! `Runner::stale_items` helper feeding the sweep prompt, and resume across
 //! a `state.json` written before this field existed.
@@ -384,6 +387,48 @@ async fn halted_sweep_increments_counter_for_survivors() {
         Some(1),
         "halted sweep must still tick beta's counter; map: {:?}",
         state.deferred_item_attempts
+    );
+}
+
+/// A *pre-dispatch* budget halt — the sweep entry sees the token cap is
+/// already exhausted and aborts before the implementer agent runs — must
+/// NOT tick `deferred_item_attempts`. Combined with `pending_sweep`
+/// retrying the same logical sweep on resume, ticking here would
+/// double-count one operator-visible attempt: once for the budget halt
+/// and again for the resume's post-dispatch increment.
+#[tokio::test]
+async fn pre_dispatch_budget_halt_does_not_tick_staleness() {
+    let initial = deferred_items_only(&[("alpha", false), ("beta", false)]);
+    let dir = make_workspace(TWO_PHASE_PLAN, &initial);
+    init_git_repo(dir.path());
+
+    let mut config = staleness_config();
+    config.budgets.max_total_tokens = Some(100);
+
+    // Empty script queue — if the budget check fires correctly, no
+    // dispatch happens and no script is consumed.
+    let agent = ScriptedAgent::new(Vec::new());
+    let mut runner = build_runner(dir.path(), TWO_PHASE_PLAN, &initial, config, agent).await;
+
+    // Pre-load token usage so the very first `check_budget()` returns a
+    // halt reason. The standalone sweep entry runs `check_budget` before
+    // bumping attempts or sending `SweepStarted`.
+    runner.state_mut().token_usage.input = 200;
+
+    let result = runner
+        .run_standalone_sweep(None, None, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, pitboss::runner::PhaseResult::Halted { .. }),
+        "expected halt, got {result:?}",
+    );
+
+    let state = runner.state();
+    assert!(
+        state.deferred_item_attempts.is_empty(),
+        "pre-dispatch budget halt must not tick the staleness clock; map: {:?}",
+        state.deferred_item_attempts,
     );
 }
 
