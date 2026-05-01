@@ -1,19 +1,29 @@
-//! Sequential grind orchestrator: pick a prompt, dispatch the agent, capture
-//! the summary, commit, repeat.
+//! Grind orchestrator: pick a prompt, dispatch the agent, capture the
+//! summary, commit, repeat — sequentially or across parallel worktrees.
 //!
-//! [`GrindRunner`] wires together the artifacts assembled in phases 01-06:
+//! [`GrindRunner`] wires together the artifacts assembled in phases 01-10:
 //! discovered prompts, a [`GrindPlan`], a [`Scheduler`], and an open
 //! [`RunDir`]. One [`GrindRunner::run`] call drives the loop until the
 //! scheduler is exhausted, the run is drained (one Ctrl-C), or the run is
 //! aborted (second Ctrl-C, or any other [`CancellationToken::cancel`]).
+//!
+//! Phase 11 lifts the runner from "one session at a time" to a real
+//! concurrency gate. Each prompt declares whether it is `parallel_safe`; the
+//! plan declares its `max_parallel` ceiling. A `tokio::sync::Semaphore` of
+//! `max_parallel` permits guards dispatch:
+//!
+//! - A `parallel_safe: true` prompt grabs one permit, runs in its own
+//!   [`SessionWorktree`] off `<run-root>/worktrees/session-NNNN/`, and
+//!   fast-forwards the run branch to its session tip on completion.
+//! - A `parallel_safe: false` prompt grabs *all* `max_parallel` permits,
+//!   effectively serializing it against any in-flight parallel sessions.
+//!   It runs in the main workspace exactly the way phase 07 wired it up.
 //!
 //! The runner is intentionally agnostic to the surface that signals a stop:
 //! it takes a [`GrindShutdown`] handle that carries an
 //! [`AtomicBool`](std::sync::atomic::AtomicBool) drain flag and a
 //! [`CancellationToken`] abort token. The CLI binds those to live `Ctrl-C`
 //! events; the integration tests flip them by hand.
-//!
-//! Sequential only — Phase 11 wires worktrees + a semaphore on top.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -23,7 +33,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as TokioMutex, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -35,11 +46,14 @@ use crate::tests as project_tests;
 
 use super::budget::{session_cost_usd, BudgetCheck, BudgetReason, BudgetTracker};
 use super::hooks::{run_hook, HookKind};
-use super::plan::{GrindPlan, PlanBudgets};
+use super::plan::{GrindPlan, Hooks, PlanBudgets};
 use super::prompt::PromptDoc;
-use super::run_dir::{RunDir, SessionRecord, SessionStatus};
+use super::run_dir::{RunDir, RunPaths, SessionRecord, SessionStatus};
 use super::scheduler::{Scheduler, SchedulerState};
 use super::state::{build_state, RunStatus};
+use super::worktree::{
+    merge_scratchpad_into_run, parallel_safe_violation_summary, SessionWorktree,
+};
 
 /// Raw markdown standing-instruction block prepended to every grind prompt.
 /// Embedded at compile time so users do not have to author it themselves and
@@ -61,8 +75,7 @@ const SCRATCHPAD_CLOSE: &str = "<!-- /pitboss:scratchpad -->";
 const SESSION_LOG_TAIL_LINES: usize = 50;
 
 /// Default per-session wall-clock cap, applied when the prompt frontmatter
-/// leaves `max_session_seconds` unset. Generous so a normal session has
-/// headroom; per-prompt enforcement lands in Phase 08.
+/// leaves `max_session_seconds` unset.
 const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(60 * 30);
 
 /// Standing-instruction text rendered into the agent's prompt body. Stable so
@@ -74,10 +87,10 @@ pub fn standing_instruction_block() -> &'static str {
 
 /// Two-stage shutdown handle.
 ///
-/// `drain` flips on the first Ctrl-C: the runner finishes the in-flight
-/// session cleanly, then exits. `abort` flips on the second Ctrl-C (or any
-/// caller-driven cancel): the in-flight agent is cancelled and the session
-/// is recorded with [`SessionStatus::Aborted`].
+/// `drain` flips on the first Ctrl-C: the runner finishes in-flight sessions
+/// cleanly, then exits. `abort` flips on the second Ctrl-C (or any
+/// caller-driven cancel): the in-flight agents are cancelled and their
+/// sessions are recorded with [`SessionStatus::Aborted`].
 ///
 /// Cloning is cheap — both handles share state across clones.
 #[derive(Debug, Clone)]
@@ -153,31 +166,37 @@ pub struct GrindRunOutcome {
     pub run_id: String,
     /// The git branch the runner committed on.
     pub branch: String,
-    /// All session records appended during this run, in dispatch order.
+    /// All session records appended during this run, in completion order.
     pub sessions: Vec<SessionRecord>,
     /// Why the loop exited.
     pub stop_reason: GrindStopReason,
 }
 
-/// Sequential grind orchestrator. See module docs.
+/// Grind orchestrator. See module docs.
 pub struct GrindRunner<A: Agent, G: Git> {
     workspace: PathBuf,
-    config: Config,
+    config: Arc<Config>,
     run_id: String,
     branch: String,
     plan: GrindPlan,
     scheduler: Scheduler,
     run_dir: RunDir,
-    agent: A,
-    git: G,
+    agent: Arc<A>,
+    git: Arc<G>,
     next_seq: u32,
     budgets: PlanBudgets,
     consecutive_failure_limit: u32,
     started_at: DateTime<Utc>,
     initial_budget: super::budget::BudgetSnapshot,
+    /// Serializes operations that touch the run branch from the main
+    /// workspace's checkout: ff-merge of session branches, scratchpad merge,
+    /// and the post-merge cleanup. Sequential sessions also hold this lock
+    /// for the duration of their commit step so a parallel session waiting
+    /// on the run branch can't interleave.
+    run_branch_lock: Arc<TokioMutex<()>>,
 }
 
-impl<A: Agent, G: Git> GrindRunner<A, G> {
+impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
     /// Build a runner ready to dispatch its first session. Caller has already
     /// created the per-run branch and checked it out.
     ///
@@ -205,19 +224,20 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         let scheduler = Scheduler::new(plan.clone(), prompts);
         Self {
             workspace,
-            config,
+            config: Arc::new(config),
             run_id,
             branch,
             plan,
             scheduler,
             run_dir,
-            agent,
-            git,
+            agent: Arc::new(agent),
+            git: Arc::new(git),
             next_seq: 1,
             budgets,
             consecutive_failure_limit,
             started_at: Utc::now(),
             initial_budget: super::budget::BudgetSnapshot::default(),
+            run_branch_lock: Arc::new(TokioMutex::new(())),
         }
     }
 
@@ -251,19 +271,20 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         let scheduler = Scheduler::with_state(plan.clone(), prompts, scheduler_state);
         Self {
             workspace,
-            config,
+            config: Arc::new(config),
             run_id,
             branch,
             plan,
             scheduler,
             run_dir,
-            agent,
-            git,
+            agent: Arc::new(agent),
+            git: Arc::new(git),
             next_seq: last_session_seq.saturating_add(1),
             budgets,
             consecutive_failure_limit,
             started_at,
             initial_budget,
+            run_branch_lock: Arc::new(TokioMutex::new(())),
         }
     }
 
@@ -304,11 +325,15 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             self.initial_budget,
         );
         let mut stop_reason = GrindStopReason::Completed;
+        let max_parallel = self.plan.max_parallel.max(1);
+        let semaphore = Arc::new(Semaphore::new(max_parallel as usize));
+        let mut tasks: JoinSet<Result<SessionRecord>> = JoinSet::new();
+        let mut max_completed_seq: u32 = self.next_seq.saturating_sub(1);
+
         // Stamp the initial state.json so a resume target exists from the
         // first moment a run is on disk, even if the host process dies before
         // a single session lands.
-        if let Err(e) = self.write_state(&tracker, self.next_seq.saturating_sub(1), RunStatus::Active)
-        {
+        if let Err(e) = self.write_state(&tracker, max_completed_seq, RunStatus::Active) {
             warn!(
                 run_id = %self.run_id,
                 error = %format!("{e:#}"),
@@ -316,7 +341,7 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             );
         }
 
-        loop {
+        'outer: loop {
             if shutdown.is_draining() {
                 stop_reason = if shutdown.cancel_token().is_cancelled() {
                     GrindStopReason::Aborted
@@ -339,48 +364,6 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
                 break;
             }
 
-            let Some(prompt) = self.scheduler.next() else {
-                break;
-            };
-
-            let seq = self.next_seq;
-            self.next_seq += 1;
-            info!(
-                run_id = %self.run_id,
-                seq,
-                prompt = %prompt.meta.name,
-                "grind: dispatching session"
-            );
-
-            let record = self.run_session(seq, &prompt, &shutdown).await?;
-            self.scheduler.record_run(&prompt.meta.name);
-            self.run_dir
-                .log()
-                .append(&record)
-                .with_context(|| format!("grind: appending session {seq} record to log"))?;
-            tracker.record_session(&record);
-            sessions.push(record.clone());
-            // Persist resume state right after the session record lands. The
-            // session log is the source of truth; state.json is a derived
-            // cache, so writing it second keeps the two consistent under
-            // crash: if the process dies between the log append and this
-            // write, resume will replay the last persisted scheduler state
-            // (which is one session behind sessions.jsonl) — the next
-            // dispatch will be the prompt we were already going to pick.
-            if let Err(e) = self.write_state(&tracker, seq, RunStatus::Active) {
-                warn!(
-                    run_id = %self.run_id,
-                    seq,
-                    error = %format!("{e:#}"),
-                    "grind: state.json write failed"
-                );
-            }
-
-            if record.status == SessionStatus::Aborted {
-                stop_reason = GrindStopReason::Aborted;
-                break;
-            }
-
             if tracker.consecutive_failure_limit_reached() {
                 warn!(
                     run_id = %self.run_id,
@@ -393,28 +376,115 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
                 break;
             }
 
-            if let BudgetCheck::Exhausted(reason) = tracker.check() {
-                info!(
-                    run_id = %self.run_id,
-                    reason = %reason,
-                    "grind: BudgetExhausted"
-                );
-                stop_reason = GrindStopReason::BudgetExhausted(reason);
+            let Some(prompt) = self.scheduler.next() else {
                 break;
+            };
+
+            let seq = self.next_seq;
+            self.next_seq += 1;
+
+            // `parallel_safe: true` takes one permit; everything else takes
+            // every permit so it can't overlap any concurrent session.
+            let permits_needed = if prompt.meta.parallel_safe {
+                1
+            } else {
+                max_parallel
+            };
+
+            let permit_outcome = self
+                .acquire_permit(
+                    semaphore.clone(),
+                    permits_needed,
+                    &mut tasks,
+                    &mut sessions,
+                    &mut tracker,
+                    &mut max_completed_seq,
+                    &shutdown,
+                )
+                .await?;
+            let permit = match permit_outcome {
+                AcquireOutcome::Got(p) => p,
+                AcquireOutcome::ShutdownTripped => {
+                    stop_reason = if shutdown.cancel_token().is_cancelled() {
+                        GrindStopReason::Aborted
+                    } else {
+                        GrindStopReason::Drained
+                    };
+                    break 'outer;
+                }
+                AcquireOutcome::BudgetTripped(reason) => {
+                    info!(
+                        run_id = %self.run_id,
+                        reason = %reason,
+                        "grind: BudgetExhausted (mid-acquire)"
+                    );
+                    stop_reason = GrindStopReason::BudgetExhausted(reason);
+                    break 'outer;
+                }
+                AcquireOutcome::ConsecutiveFailures => {
+                    warn!(
+                        run_id = %self.run_id,
+                        limit = self.consecutive_failure_limit,
+                        "grind: consecutive-failure limit reached"
+                    );
+                    stop_reason = GrindStopReason::ConsecutiveFailureLimit {
+                        limit: self.consecutive_failure_limit,
+                    };
+                    break 'outer;
+                }
+            };
+
+            // Now committed to dispatch — bump the scheduler so the next
+            // pick reflects this run.
+            self.scheduler.record_run(&prompt.meta.name);
+
+            info!(
+                run_id = %self.run_id,
+                seq,
+                prompt = %prompt.meta.name,
+                parallel_safe = prompt.meta.parallel_safe,
+                "grind: dispatching session"
+            );
+
+            let input = self
+                .prepare_session_input(seq, prompt, permit, &shutdown)
+                .await
+                .with_context(|| format!("grind: preparing session {seq}"))?;
+            tasks.spawn(run_session_task(input));
+        }
+
+        // Drain in-flight tasks.
+        while let Some(res) = tasks.join_next().await {
+            match res {
+                Ok(Ok(rec)) => self.handle_completion(
+                    rec,
+                    &mut sessions,
+                    &mut tracker,
+                    &mut max_completed_seq,
+                )?,
+                Ok(Err(e)) => return Err(e),
+                Err(je) => {
+                    return Err(anyhow::anyhow!("session task panicked: {je}"));
+                }
             }
         }
 
-        // Stamp the terminal state.json so resume callers can tell at a
-        // glance whether a run is still live. Use the seq of the last
-        // recorded session (or 0 when none ran).
-        let terminal_seq = sessions.last().map(|r| r.seq).unwrap_or(0);
+        // Aborted sessions in the drain phase should propagate as Aborted
+        // stop reason if we weren't already Aborted/Drained.
+        if matches!(stop_reason, GrindStopReason::Completed)
+            && sessions.iter().any(|r| r.status == SessionStatus::Aborted)
+        {
+            stop_reason = GrindStopReason::Aborted;
+        }
+
+        // Stamp the terminal state.json.
         let terminal_status = match &stop_reason {
             GrindStopReason::Completed => RunStatus::Completed,
             GrindStopReason::Drained | GrindStopReason::Aborted => RunStatus::Aborted,
             GrindStopReason::BudgetExhausted(_)
             | GrindStopReason::ConsecutiveFailureLimit { .. } => RunStatus::Failed,
         };
-        if let Err(e) = self.write_state(&tracker, terminal_seq, terminal_status) {
+        if let Err(e) = self.write_state(&tracker, max_completed_seq, terminal_status) {
             warn!(
                 run_id = %self.run_id,
                 error = %format!("{e:#}"),
@@ -427,6 +497,169 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             branch: self.branch.clone(),
             sessions,
             stop_reason,
+        })
+    }
+
+    /// Wait until `permits_needed` permits are available, draining session
+    /// completions in the meantime so each finished record lands in the
+    /// session log + state.json before the next dispatch is committed.
+    #[allow(clippy::too_many_arguments)]
+    async fn acquire_permit(
+        &self,
+        semaphore: Arc<Semaphore>,
+        permits_needed: u32,
+        tasks: &mut JoinSet<Result<SessionRecord>>,
+        sessions: &mut Vec<SessionRecord>,
+        tracker: &mut BudgetTracker,
+        max_completed_seq: &mut u32,
+        shutdown: &GrindShutdown,
+    ) -> Result<AcquireOutcome> {
+        loop {
+            if shutdown.is_draining() {
+                return Ok(AcquireOutcome::ShutdownTripped);
+            }
+
+            if let Ok(p) = semaphore.clone().try_acquire_many_owned(permits_needed) {
+                return Ok(AcquireOutcome::Got(p));
+            }
+
+            if tasks.is_empty() {
+                // Permits requested exceed the configured ceiling — block
+                // unconditionally so the test for `permits_needed >
+                // max_parallel` still resolves rather than spinning.
+                return Ok(AcquireOutcome::Got(
+                    semaphore.acquire_many_owned(permits_needed).await?,
+                ));
+            }
+
+            let Some(res) = tasks.join_next().await else {
+                continue;
+            };
+            match res {
+                Ok(Ok(rec)) => {
+                    self.handle_completion(rec, sessions, tracker, max_completed_seq)?
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(je) => return Err(anyhow::anyhow!("session task panicked: {je}")),
+            }
+
+            if let BudgetCheck::Exhausted(reason) = tracker.check() {
+                return Ok(AcquireOutcome::BudgetTripped(reason));
+            }
+            if tracker.consecutive_failure_limit_reached() {
+                return Ok(AcquireOutcome::ConsecutiveFailures);
+            }
+        }
+    }
+
+    fn handle_completion(
+        &self,
+        record: SessionRecord,
+        sessions: &mut Vec<SessionRecord>,
+        tracker: &mut BudgetTracker,
+        max_completed_seq: &mut u32,
+    ) -> Result<()> {
+        let seq = record.seq;
+        self.run_dir
+            .log()
+            .append(&record)
+            .with_context(|| format!("grind: appending session {seq} record to log"))?;
+        tracker.record_session(&record);
+        if seq > *max_completed_seq {
+            *max_completed_seq = seq;
+        }
+        sessions.push(record);
+        if let Err(e) = self.write_state(tracker, *max_completed_seq, RunStatus::Active) {
+            warn!(
+                run_id = %self.run_id,
+                seq,
+                error = %format!("{e:#}"),
+                "grind: state.json write failed"
+            );
+        }
+        Ok(())
+    }
+
+    async fn prepare_session_input(
+        &self,
+        seq: u32,
+        prompt: PromptDoc,
+        permit: OwnedSemaphorePermit,
+        shutdown: &GrindShutdown,
+    ) -> Result<SessionTaskInput<A, G>> {
+        let transcript_path = self.run_dir.paths().transcript_for(seq);
+        let summary_path = self
+            .run_dir
+            .paths()
+            .root
+            .join(format!(".pitboss-summary-{seq:04}.txt"));
+        // Make sure the summary path is empty so a stale value from a prior
+        // session can never be misread as the agent's current output.
+        let _ = std::fs::remove_file(&summary_path);
+
+        let session_log_tail = self
+            .read_session_log_tail()
+            .unwrap_or_else(|e| format!("(failed to read sessions.md: {e})"));
+        let scratchpad_seed = self
+            .run_dir
+            .scratchpad()
+            .read()
+            .unwrap_or_else(|e| format!("(failed to read scratchpad: {e})"));
+
+        let mut base_env: HashMap<String, String> = HashMap::new();
+        base_env.insert("PITBOSS_RUN_ID".into(), self.run_id.clone());
+        base_env.insert("PITBOSS_PROMPT_NAME".into(), prompt.meta.name.clone());
+        base_env.insert(
+            "PITBOSS_SUMMARY_FILE".into(),
+            summary_path.display().to_string(),
+        );
+        base_env.insert("PITBOSS_SESSION_SEQ".into(), seq.to_string());
+
+        let (workdir_for_agent, scratchpad_path_for_agent, worktree_opt) =
+            if prompt.meta.parallel_safe {
+                let wt = SessionWorktree::create(
+                    &*self.git,
+                    self.run_dir.paths(),
+                    &self.run_id,
+                    &self.branch,
+                    seq,
+                    &scratchpad_seed,
+                )
+                .await
+                .with_context(|| format!("grind: creating worktree for session {seq}"))?;
+                let path = wt.path().to_path_buf();
+                let pad = wt.scratchpad_path().to_path_buf();
+                (path, pad, Some(wt))
+            } else {
+                let pad = self.run_dir.scratchpad().path_for_agent().to_path_buf();
+                (self.workspace.clone(), pad, None)
+            };
+        base_env.insert(
+            "PITBOSS_SCRATCHPAD".into(),
+            scratchpad_path_for_agent.display().to_string(),
+        );
+
+        Ok(SessionTaskInput {
+            repo_root: self.workspace.clone(),
+            workdir_for_agent,
+            config: self.config.clone(),
+            run_id: self.run_id.clone(),
+            run_branch: self.branch.clone(),
+            plan_hooks: self.plan.hooks.clone(),
+            run_paths: self.run_dir.paths().clone(),
+            transcript_path,
+            summary_path,
+            seq,
+            prompt,
+            agent: self.agent.clone(),
+            repo_git: self.git.clone(),
+            worktree: worktree_opt,
+            run_branch_lock: self.run_branch_lock.clone(),
+            shutdown: shutdown.clone(),
+            permit,
+            session_log_tail,
+            scratchpad_seed,
+            base_env,
         })
     }
 
@@ -456,396 +689,6 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         state.write(self.run_dir.paths())
     }
 
-    async fn run_session(
-        &self,
-        seq: u32,
-        prompt: &PromptDoc,
-        shutdown: &GrindShutdown,
-    ) -> Result<SessionRecord> {
-        let started_at = Utc::now();
-        let transcript_path = self.run_dir.paths().transcript_for(seq);
-        let transcript_rel = relative_to(&self.workspace, &transcript_path);
-
-        let summary_path = self
-            .run_dir
-            .paths()
-            .root
-            .join(format!(".pitboss-summary-{:04}.txt", seq));
-        // Make sure the summary path is empty so a stale value from a prior
-        // session can never be misread as the agent's current output.
-        let _ = std::fs::remove_file(&summary_path);
-
-        let scratchpad_path = self.run_dir.scratchpad().path_for_agent().to_path_buf();
-
-        let mut base_env: HashMap<String, String> = HashMap::new();
-        base_env.insert("PITBOSS_RUN_ID".into(), self.run_id.clone());
-        base_env.insert("PITBOSS_PROMPT_NAME".into(), prompt.meta.name.clone());
-        base_env.insert(
-            "PITBOSS_SUMMARY_FILE".into(),
-            summary_path.display().to_string(),
-        );
-        base_env.insert(
-            "PITBOSS_SCRATCHPAD".into(),
-            scratchpad_path.display().to_string(),
-        );
-        base_env.insert("PITBOSS_SESSION_SEQ".into(), seq.to_string());
-
-        let hook_timeout =
-            Duration::from_secs(self.config.grind.hook_timeout_secs.max(1));
-
-        // ---- pre_session hook ---------------------------------------------
-        // Runs before the agent dispatch. Non-zero exit / timeout / spawn
-        // failure all skip dispatch and resolve the session as `Error`.
-        let mut skip_dispatch_reason: Option<String> = None;
-        if let Some(cmd) = self.plan.hooks.pre_session.as_deref() {
-            let mut env = base_env.clone();
-            env.insert("PITBOSS_SESSION_PROMPT".into(), prompt.meta.name.clone());
-            let outcome = run_hook(
-                HookKind::PreSession,
-                cmd,
-                &env,
-                hook_timeout,
-                &transcript_path,
-            )
-            .await;
-            if !outcome.is_success() {
-                warn!(
-                    run_id = %self.run_id,
-                    seq,
-                    outcome = %outcome.description(),
-                    "grind: pre_session hook failed; skipping dispatch"
-                );
-                skip_dispatch_reason =
-                    Some(format!("pre_session hook {}", outcome.description()));
-            }
-        }
-
-        let mut status: SessionStatus;
-        let summary: String;
-        let mut commit: Option<CommitId> = None;
-        let mut tokens: TokenUsage = TokenUsage::default();
-        let mut cost_usd: f64 = 0.0;
-        let ended_at: DateTime<Utc>;
-
-        if let Some(reason) = skip_dispatch_reason {
-            status = SessionStatus::Error;
-            summary = reason;
-            ended_at = Utc::now();
-        } else {
-            let session_log_tail = self
-                .read_session_log_tail()
-                .unwrap_or_else(|e| format!("(failed to read sessions.md: {e})"));
-            let scratchpad_text = self
-                .run_dir
-                .scratchpad()
-                .read()
-                .unwrap_or_else(|e| format!("(failed to read scratchpad: {e})"));
-
-            let user_prompt = compose_user_prompt(
-                STANDING_INSTRUCTION_TEMPLATE,
-                &session_log_tail,
-                &scratchpad_text,
-                &prompt.body,
-            );
-
-            let timeout = prompt
-                .meta
-                .max_session_seconds
-                .map(Duration::from_secs)
-                .unwrap_or(DEFAULT_SESSION_TIMEOUT);
-
-            let model = self.config.models.implementer.clone();
-            let request = AgentRequest {
-                role: Role::Implementer,
-                model: model.clone(),
-                system_prompt: String::new(),
-                user_prompt,
-                workdir: self.workspace.clone(),
-                log_path: transcript_path.clone(),
-                timeout,
-                env: base_env.clone(),
-            };
-
-            // Outer wall-clock guard. The agent itself honors `request.timeout`
-            // (subprocess kill, etc.), but a misbehaving or stub agent might
-            // not — wrapping the dispatch in `tokio::time::timeout` makes the
-            // cap enforceable from pitboss's side. A timeout drops the agent
-            // future, which cancels the underlying subprocess by destruction,
-            // and we synthesize a `Timeout` outcome so the session record
-            // reflects what happened.
-            let mut summary_override: Option<String> = None;
-            let dispatch = match tokio::time::timeout(
-                timeout,
-                self.dispatch_agent(request, shutdown.cancel_token()),
-            )
-            .await
-            {
-                Ok(res) => res?,
-                Err(_) => {
-                    warn!(
-                        run_id = %self.run_id,
-                        seq,
-                        timeout_secs = timeout.as_secs(),
-                        "grind: per-prompt timeout fired"
-                    );
-                    summary_override = Some(format!(
-                        "session exceeded max_session_seconds ({}s)",
-                        timeout.as_secs()
-                    ));
-                    AgentDispatch {
-                        stop_reason: StopReason::Timeout,
-                        tokens: TokenUsage::default(),
-                    }
-                }
-            };
-            ended_at = Utc::now();
-
-            status = match &dispatch.stop_reason {
-                StopReason::Completed => SessionStatus::Ok,
-                StopReason::Timeout => SessionStatus::Timeout,
-                StopReason::Cancelled => SessionStatus::Aborted,
-                StopReason::Error(_) => SessionStatus::Error,
-            };
-
-            cost_usd = session_cost_usd(
-                &self.config,
-                &model,
-                dispatch.tokens.input,
-                dispatch.tokens.output,
-            );
-
-            // Post-hoc cost cap. The agent can't know its rolling spend during
-            // a dispatch, so the per-prompt cost limit fires after the session
-            // completes: if the final cost is over the cap, the session is
-            // recorded as `Error` with a clear summary rather than letting the
-            // agent's own report stand.
-            if status == SessionStatus::Ok {
-                if let Some(cap) = prompt.meta.max_session_cost_usd {
-                    if cost_usd > cap {
-                        warn!(
-                            run_id = %self.run_id,
-                            seq,
-                            cost = cost_usd,
-                            cap,
-                            "grind: per-prompt max_session_cost_usd exceeded"
-                        );
-                        status = SessionStatus::Error;
-                        summary_override = Some(format!(
-                            "session exceeded max_session_cost_usd: ${cost_usd:.4} > ${cap:.4}"
-                        ));
-                    }
-                }
-            }
-
-            summary = match summary_override {
-                Some(s) => s,
-                None => read_summary_or_fallback(&summary_path),
-            };
-
-            if status == SessionStatus::Ok && prompt.meta.verify {
-                status = self.verify_session(seq, prompt, &transcript_path).await?;
-            }
-
-            commit = match status {
-                SessionStatus::Ok | SessionStatus::Error => {
-                    // We try to land whatever changes the agent produced even
-                    // on Error so partial work isn't lost; the session record
-                    // carries the status verbatim. Aborted/Timeout sessions
-                    // skip the commit step because the working tree state is
-                    // undefined. Dirty is set later (after the stash) so it
-                    // never reaches this match.
-                    self.try_commit_session(seq, prompt).await?
-                }
-                _ => None,
-            };
-
-            // Stash any stragglers so the next session starts clean. Sessions
-            // that already aborted leave behind whatever the agent produced —
-            // stashing it labeled is preferable to discarding. `.pitboss/` is
-            // excluded so the run's own bookkeeping (sessions.jsonl,
-            // scratchpad, transcripts) stays in place between sessions.
-            let stash_label = format!("grind/{}/session-{:04}-leftover", self.run_id, seq);
-            let pitboss_rel = Path::new(".pitboss");
-            match self.git.stash_push(&stash_label, &[pitboss_rel]).await {
-                Ok(true) => {
-                    warn!(
-                        run_id = %self.run_id,
-                        seq,
-                        stash = %stash_label,
-                        "grind: leftover changes stashed"
-                    );
-                    // The session itself was otherwise clean — the dirty
-                    // marker is a triage hint, not an outright failure.
-                    // Aborted / Timeout / Error stay as-is so the failure mode
-                    // is preserved.
-                    if status == SessionStatus::Ok {
-                        status = SessionStatus::Dirty;
-                    }
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    warn!(
-                        run_id = %self.run_id,
-                        seq,
-                        error = %format!("{e:#}"),
-                        "grind: stash_push failed"
-                    );
-                }
-            }
-
-            tokens = dispatch.tokens;
-        }
-
-        // ---- post_session / on_failure hooks ------------------------------
-        // post_session fires for every resolved session regardless of status;
-        // on_failure fires only when the status is non-`Ok`. Both receive
-        // `PITBOSS_SESSION_STATUS` and `PITBOSS_SESSION_SUMMARY` on top of the
-        // shared agent env, plus `PITBOSS_SESSION_PROMPT`. Their exit codes
-        // are logged but do not influence the recorded session status.
-        let mut hook_env = base_env.clone();
-        hook_env.insert("PITBOSS_SESSION_PROMPT".into(), prompt.meta.name.clone());
-        hook_env.insert("PITBOSS_SESSION_STATUS".into(), status.as_str().to_string());
-        hook_env.insert("PITBOSS_SESSION_SUMMARY".into(), summary.clone());
-        if let Some(cmd) = self.plan.hooks.post_session.as_deref() {
-            let _ = run_hook(
-                HookKind::PostSession,
-                cmd,
-                &hook_env,
-                hook_timeout,
-                &transcript_path,
-            )
-            .await;
-        }
-        if status != SessionStatus::Ok {
-            if let Some(cmd) = self.plan.hooks.on_failure.as_deref() {
-                let _ = run_hook(
-                    HookKind::OnFailure,
-                    cmd,
-                    &hook_env,
-                    hook_timeout,
-                    &transcript_path,
-                )
-                .await;
-            }
-        }
-
-        Ok(SessionRecord {
-            seq,
-            run_id: self.run_id.clone(),
-            prompt: prompt.meta.name.clone(),
-            started_at,
-            ended_at,
-            status,
-            summary: Some(summary),
-            commit,
-            tokens,
-            cost_usd,
-            transcript_path: transcript_rel,
-        })
-    }
-
-    /// Commit any code changes the session produced. Returns the new commit
-    /// id, or `None` if there was nothing code-side to commit (e.g., the
-    /// agent only edited `.pitboss/`).
-    async fn try_commit_session(&self, seq: u32, prompt: &PromptDoc) -> Result<Option<CommitId>> {
-        // `.pitboss/` is excluded the same way `pitboss play` does — sessions.jsonl
-        // and friends live under there and would otherwise pollute every grind
-        // commit.
-        let pitboss_rel = Path::new(".pitboss");
-        self.git
-            .stage_changes(&[pitboss_rel])
-            .await
-            .with_context(|| format!("grind: staging session {seq} changes"))?;
-
-        let has_staged = self
-            .git
-            .has_staged_changes()
-            .await
-            .with_context(|| format!("grind: checking staged changes for session {seq}"))?;
-        if !has_staged {
-            debug!(seq, prompt = %prompt.meta.name, "grind: no code changes to commit");
-            return Ok(None);
-        }
-
-        let message = format!(
-            "[pitboss/grind] {} session-{:04} ({})",
-            prompt.meta.name, seq, self.run_id,
-        );
-        let id = self
-            .git
-            .commit(&message)
-            .await
-            .with_context(|| format!("grind: committing session {seq}"))?;
-        Ok(Some(id))
-    }
-
-    /// Auto-detect the project's test runner and run it once. Returns
-    /// [`SessionStatus::Ok`] when tests pass and [`SessionStatus::Error`] when
-    /// they fail. The fixer cycle is deferred to a follow-up; see deferred.md.
-    async fn verify_session(
-        &self,
-        seq: u32,
-        prompt: &PromptDoc,
-        transcript_path: &Path,
-    ) -> Result<SessionStatus> {
-        let Some(runner) =
-            project_tests::detect(&self.workspace, self.config.tests.command.as_deref())
-        else {
-            debug!(
-                seq,
-                prompt = %prompt.meta.name,
-                "grind: verify requested but no test runner detected"
-            );
-            return Ok(SessionStatus::Ok);
-        };
-        // Sibling log next to the agent transcript: `TestRunner::run` opens
-        // its log_path with `truncate(true)`, so reusing the transcript path
-        // would erase the agent's session output.
-        let verify_log = transcript_path.with_extension("verify.log");
-        let outcome = runner
-            .run(verify_log)
-            .await
-            .with_context(|| format!("grind: verify run for session {seq}"))?;
-        if outcome.passed {
-            Ok(SessionStatus::Ok)
-        } else {
-            warn!(
-                seq,
-                prompt = %prompt.meta.name,
-                summary = %outcome.summary,
-                "grind: verify failed"
-            );
-            Ok(SessionStatus::Error)
-        }
-    }
-
-    async fn dispatch_agent(
-        &self,
-        request: AgentRequest,
-        cancel: &CancellationToken,
-    ) -> Result<AgentDispatch> {
-        let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(64);
-        let cancel_clone = cancel.clone();
-        let drain_task = tokio::spawn(async move {
-            while events_rx.recv().await.is_some() {
-                // Phase 13 wires these into the TUI; for now we drop them so
-                // the channel doesn't apply backpressure on the agent.
-            }
-        });
-
-        let outcome = self
-            .agent
-            .run(request, events_tx, cancel_clone)
-            .await
-            .context("grind: agent dispatch failed")?;
-        let _ = drain_task.await;
-
-        Ok(AgentDispatch {
-            stop_reason: outcome.stop_reason,
-            tokens: outcome.tokens,
-        })
-    }
-
     fn read_session_log_tail(&self) -> Result<String> {
         let path = &self.run_dir.paths().sessions_md;
         let raw = match std::fs::read_to_string(path) {
@@ -857,6 +700,557 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         };
         Ok(tail_lines(&raw, SESSION_LOG_TAIL_LINES))
     }
+}
+
+/// Resolution of [`GrindRunner::acquire_permit`]. Distinguishes the various
+/// "could not acquire" branches so the main loop maps each to the right
+/// [`GrindStopReason`].
+enum AcquireOutcome {
+    Got(OwnedSemaphorePermit),
+    ShutdownTripped,
+    BudgetTripped(BudgetReason),
+    ConsecutiveFailures,
+}
+
+/// Bundle of everything a spawned session task needs. Owned/`Arc` so the
+/// task body has no borrow back to the runner.
+struct SessionTaskInput<A: Agent, G: Git> {
+    /// Path of the main workspace. Used for `relative_to` on transcripts and
+    /// for ff-merge into the run branch.
+    repo_root: PathBuf,
+    /// Where the agent should run — main workspace for sequential, the
+    /// session worktree for parallel.
+    workdir_for_agent: PathBuf,
+    config: Arc<Config>,
+    run_id: String,
+    run_branch: String,
+    plan_hooks: Hooks,
+    run_paths: RunPaths,
+    transcript_path: PathBuf,
+    summary_path: PathBuf,
+    seq: u32,
+    prompt: PromptDoc,
+    agent: Arc<A>,
+    repo_git: Arc<G>,
+    worktree: Option<SessionWorktree>,
+    run_branch_lock: Arc<TokioMutex<()>>,
+    shutdown: GrindShutdown,
+    permit: OwnedSemaphorePermit,
+    session_log_tail: String,
+    /// Snapshot of the run-level scratchpad at session start. Embedded into
+    /// the agent's user prompt and used as the seed for the per-session
+    /// scratchpad merge in parallel mode.
+    scratchpad_seed: String,
+    base_env: HashMap<String, String>,
+}
+
+/// Body of one dispatched session. Returns the resulting [`SessionRecord`];
+/// the runner appends it to the log and folds it into the budget tracker.
+async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
+    input: SessionTaskInput<A, G>,
+) -> Result<SessionRecord> {
+    let SessionTaskInput {
+        repo_root,
+        workdir_for_agent,
+        config,
+        run_id,
+        run_branch,
+        plan_hooks,
+        run_paths,
+        transcript_path,
+        summary_path,
+        seq,
+        prompt,
+        agent,
+        repo_git,
+        worktree,
+        run_branch_lock,
+        shutdown,
+        permit,
+        session_log_tail,
+        scratchpad_seed,
+        base_env,
+    } = input;
+
+    let started_at = Utc::now();
+    let transcript_rel = relative_to(&repo_root, &transcript_path);
+
+    let hook_timeout = Duration::from_secs(config.grind.hook_timeout_secs.max(1));
+
+    // ---- pre_session hook ---------------------------------------------
+    let mut skip_dispatch_reason: Option<String> = None;
+    if let Some(cmd) = plan_hooks.pre_session.as_deref() {
+        let mut env = base_env.clone();
+        env.insert("PITBOSS_SESSION_PROMPT".into(), prompt.meta.name.clone());
+        let outcome = run_hook(
+            HookKind::PreSession,
+            cmd,
+            &env,
+            hook_timeout,
+            &transcript_path,
+        )
+        .await;
+        if !outcome.is_success() {
+            warn!(
+                run_id = %run_id,
+                seq,
+                outcome = %outcome.description(),
+                "grind: pre_session hook failed; skipping dispatch"
+            );
+            skip_dispatch_reason = Some(format!("pre_session hook {}", outcome.description()));
+        }
+    }
+
+    let mut status: SessionStatus;
+    let mut summary: String;
+    let mut commit: Option<CommitId> = None;
+    let mut tokens: TokenUsage = TokenUsage::default();
+    let mut cost_usd: f64 = 0.0;
+    let ended_at: DateTime<Utc>;
+
+    if let Some(reason) = skip_dispatch_reason {
+        status = SessionStatus::Error;
+        summary = reason;
+        ended_at = Utc::now();
+    } else {
+        let user_prompt = compose_user_prompt(
+            STANDING_INSTRUCTION_TEMPLATE,
+            &session_log_tail,
+            &scratchpad_seed,
+            &prompt.body,
+        );
+
+        let timeout = prompt
+            .meta
+            .max_session_seconds
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_SESSION_TIMEOUT);
+
+        let model = config.models.implementer.clone();
+        let request = AgentRequest {
+            role: Role::Implementer,
+            model: model.clone(),
+            system_prompt: String::new(),
+            user_prompt,
+            workdir: workdir_for_agent.clone(),
+            log_path: transcript_path.clone(),
+            timeout,
+            env: base_env.clone(),
+        };
+
+        let mut summary_override: Option<String> = None;
+        let dispatch = match tokio::time::timeout(
+            timeout,
+            dispatch_agent(&*agent, request, shutdown.cancel_token()),
+        )
+        .await
+        {
+            Ok(res) => res?,
+            Err(_) => {
+                warn!(
+                    run_id = %run_id,
+                    seq,
+                    timeout_secs = timeout.as_secs(),
+                    "grind: per-prompt timeout fired"
+                );
+                summary_override = Some(format!(
+                    "session exceeded max_session_seconds ({}s)",
+                    timeout.as_secs()
+                ));
+                AgentDispatch {
+                    stop_reason: StopReason::Timeout,
+                    tokens: TokenUsage::default(),
+                }
+            }
+        };
+        ended_at = Utc::now();
+
+        status = match &dispatch.stop_reason {
+            StopReason::Completed => SessionStatus::Ok,
+            StopReason::Timeout => SessionStatus::Timeout,
+            StopReason::Cancelled => SessionStatus::Aborted,
+            StopReason::Error(_) => SessionStatus::Error,
+        };
+
+        cost_usd = session_cost_usd(
+            &config,
+            &model,
+            dispatch.tokens.input,
+            dispatch.tokens.output,
+        );
+
+        if status == SessionStatus::Ok {
+            if let Some(cap) = prompt.meta.max_session_cost_usd {
+                if cost_usd > cap {
+                    warn!(
+                        run_id = %run_id,
+                        seq,
+                        cost = cost_usd,
+                        cap,
+                        "grind: per-prompt max_session_cost_usd exceeded"
+                    );
+                    status = SessionStatus::Error;
+                    summary_override = Some(format!(
+                        "session exceeded max_session_cost_usd: ${cost_usd:.4} > ${cap:.4}"
+                    ));
+                }
+            }
+        }
+
+        summary = match summary_override {
+            Some(s) => s,
+            None => read_summary_or_fallback(&summary_path),
+        };
+
+        if status == SessionStatus::Ok && prompt.meta.verify {
+            status = verify_session(
+                seq,
+                &prompt,
+                &workdir_for_agent,
+                config.tests.command.as_deref(),
+                &transcript_path,
+            )
+            .await?;
+        }
+
+        // Commit + stash. Sequential and parallel sessions share the same
+        // commit / stash logic but run it against different git handles —
+        // sequential against the workspace-rooted runner git, parallel
+        // against a worktree-scoped ShellGit owned by the SessionWorktree.
+        // Parallel sessions also hold the run-branch lock for the entire
+        // sync → commit → ff-merge dance so a sibling session cannot
+        // interleave between the steps.
+        if let Some(wt) = &worktree {
+            let g = wt.worktree_git();
+            let _guard = run_branch_lock.lock().await;
+
+            // Step 1 — sync the worktree's session branch to the current
+            // run-branch tip. When the session was created run_branch was at
+            // commit A; another parallel session may have advanced it to A'
+            // since. Replaying that fast-forward inside the worktree is what
+            // makes the eventual run-branch ff-merge possible. If the FF
+            // refuses (because the agent's uncommitted edits would be
+            // overwritten by the incoming run-branch tip), the prompt
+            // violated its `parallel_safe: true` claim — we mark the session
+            // Error and skip the commit / merge entirely.
+            let mut sync_ok = true;
+            if status == SessionStatus::Ok || status == SessionStatus::Error {
+                if let Err(e) = g.merge_ff_only(&run_branch).await {
+                    warn!(
+                        run_id = %run_id,
+                        seq,
+                        error = %format!("{e:#}"),
+                        prompt = %prompt.meta.name,
+                        "grind: parallel_safe contract violation (worktree sync)"
+                    );
+                    status = SessionStatus::Error;
+                    summary = parallel_safe_violation_summary(&prompt.meta.name);
+                    sync_ok = false;
+                }
+            }
+
+            // Step 2 — commit on top of the synced HEAD. The per-session
+            // scratchpad lives at the worktree root and must stay out of
+            // the run-branch tree; the runner merges it back into the
+            // run-level scratchpad below.
+            let pitboss_rel = Path::new(".pitboss");
+            let scratchpad_rel = Path::new("scratchpad.md");
+            let parallel_exclusions: [&Path; 2] = [pitboss_rel, scratchpad_rel];
+            if sync_ok {
+                commit = match status {
+                    SessionStatus::Ok | SessionStatus::Error => {
+                        try_commit_session(g, seq, &prompt, &run_id, &parallel_exclusions).await?
+                    }
+                    _ => None,
+                };
+            }
+
+            // Step 3 — fast-forward the run branch to the session tip. The
+            // sync above guarantees this is a strict descendant unless
+            // run_branch raced forward between sync and merge — but the
+            // run_branch_lock prevents that.
+            if sync_ok && commit.is_some() {
+                if let Err(e) = repo_git.merge_ff_only(wt.branch()).await {
+                    warn!(
+                        run_id = %run_id,
+                        seq,
+                        error = %format!("{e:#}"),
+                        prompt = %prompt.meta.name,
+                        "grind: parallel_safe contract violation (run-branch ff)"
+                    );
+                    status = SessionStatus::Error;
+                    summary = parallel_safe_violation_summary(&prompt.meta.name);
+                    commit = None;
+                }
+            }
+
+            // Step 4 — stash any leftover edits the agent left behind in
+            // the worktree so the directory is clean before teardown.
+            // Skipped when the sync failed (we never advanced HEAD, so the
+            // leftover is exactly what the agent wrote — quarantine will
+            // keep it). Same exclusions as the commit step so the
+            // per-session scratchpad survives the stash for the merge.
+            if sync_ok {
+                let stash_label = format!("grind/{}/session-{:04}-leftover", run_id, seq);
+                match g.stash_push(&stash_label, &parallel_exclusions).await {
+                    Ok(true) => {
+                        warn!(
+                            run_id = %run_id,
+                            seq,
+                            stash = %stash_label,
+                            "grind: leftover changes stashed (parallel)"
+                        );
+                        if status == SessionStatus::Ok {
+                            status = SessionStatus::Dirty;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(
+                            run_id = %run_id,
+                            seq,
+                            error = %format!("{e:#}"),
+                            "grind: stash_push failed (parallel)"
+                        );
+                    }
+                }
+            }
+            drop(_guard);
+        } else {
+            // Sequential: hold the run-branch lock so a concurrent parallel
+            // session cannot ff-merge while we're staging / committing.
+            let _guard = run_branch_lock.lock().await;
+            let pitboss_rel = Path::new(".pitboss");
+            let sequential_exclusions: [&Path; 1] = [pitboss_rel];
+            commit = match status {
+                SessionStatus::Ok | SessionStatus::Error => {
+                    try_commit_session(&*repo_git, seq, &prompt, &run_id, &sequential_exclusions)
+                        .await?
+                }
+                _ => None,
+            };
+            let stash_label = format!("grind/{}/session-{:04}-leftover", run_id, seq);
+            match repo_git.stash_push(&stash_label, &sequential_exclusions).await {
+                Ok(true) => {
+                    warn!(
+                        run_id = %run_id,
+                        seq,
+                        stash = %stash_label,
+                        "grind: leftover changes stashed"
+                    );
+                    if status == SessionStatus::Ok {
+                        status = SessionStatus::Dirty;
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        run_id = %run_id,
+                        seq,
+                        error = %format!("{e:#}"),
+                        "grind: stash_push failed"
+                    );
+                }
+            }
+        }
+
+        tokens = dispatch.tokens;
+    }
+
+    // ---- per-session scratchpad merge (parallel only) ----------------
+    if let Some(wt) = &worktree {
+        // The agent wrote into the per-session scratchpad view; fold those
+        // edits back into the run-level scratchpad. Held under the run
+        // branch lock to avoid interleaving with another session's merge.
+        // Always attempted (even on Error) so an agent that produced useful
+        // notes before failing doesn't silently lose them.
+        let session_view = std::fs::read_to_string(wt.scratchpad_path()).unwrap_or_default();
+        let _guard = run_branch_lock.lock().await;
+        if let Err(e) = merge_scratchpad_into_run(
+            &run_paths.scratchpad,
+            &session_view,
+            wt.scratchpad_seed(),
+            seq,
+        ) {
+            warn!(
+                run_id = %run_id,
+                seq,
+                error = %format!("{e:#}"),
+                "grind: scratchpad merge failed"
+            );
+        }
+        drop(_guard);
+    }
+
+    // ---- worktree teardown -------------------------------------------
+    if let Some(wt) = worktree {
+        let cleaned = if status == SessionStatus::Ok {
+            wt.cleanup(&*repo_git).await
+        } else {
+            // Leave the worktree behind under worktrees/failed/ for triage.
+            wt.quarantine(&*repo_git).await.map(|_| ())
+        };
+        if let Err(e) = cleaned {
+            warn!(
+                run_id = %run_id,
+                seq,
+                error = %format!("{e:#}"),
+                "grind: worktree teardown failed"
+            );
+        }
+    }
+
+    // ---- post_session / on_failure hooks ------------------------------
+    let mut hook_env = base_env.clone();
+    hook_env.insert("PITBOSS_SESSION_PROMPT".into(), prompt.meta.name.clone());
+    hook_env.insert("PITBOSS_SESSION_STATUS".into(), status.as_str().to_string());
+    hook_env.insert("PITBOSS_SESSION_SUMMARY".into(), summary.clone());
+    if let Some(cmd) = plan_hooks.post_session.as_deref() {
+        let _ = run_hook(
+            HookKind::PostSession,
+            cmd,
+            &hook_env,
+            hook_timeout,
+            &transcript_path,
+        )
+        .await;
+    }
+    if status != SessionStatus::Ok {
+        if let Some(cmd) = plan_hooks.on_failure.as_deref() {
+            let _ = run_hook(
+                HookKind::OnFailure,
+                cmd,
+                &hook_env,
+                hook_timeout,
+                &transcript_path,
+            )
+            .await;
+        }
+    }
+
+    // The run_branch is unused beyond this point; consume it to silence the
+    // unused-variable warning while keeping the field on `SessionTaskInput`
+    // for symmetry with other run-level handles.
+    let _ = run_branch;
+
+    drop(permit);
+
+    Ok(SessionRecord {
+        seq,
+        run_id,
+        prompt: prompt.meta.name.clone(),
+        started_at,
+        ended_at,
+        status,
+        summary: Some(summary),
+        commit,
+        tokens,
+        cost_usd,
+        transcript_path: transcript_rel,
+    })
+}
+
+/// Stage and commit any code changes the session produced. Returns the new
+/// commit id, or `None` if there was nothing code-side to commit (e.g., the
+/// agent only edited `.pitboss/`).
+///
+/// `exclude` is the per-call exclusion set forwarded to
+/// [`Git::stage_changes`]. Sequential sessions pass just `.pitboss/`;
+/// parallel sessions also pass the per-session `scratchpad.md` so the
+/// worktree-rooted scratchpad never lands in the run-branch tree (it lives
+/// outside git's history; pitboss merges it back via [`merge_scratchpad_into_run`]).
+async fn try_commit_session<G: Git + ?Sized>(
+    git: &G,
+    seq: u32,
+    prompt: &PromptDoc,
+    run_id: &str,
+    exclude: &[&Path],
+) -> Result<Option<CommitId>> {
+    git.stage_changes(exclude)
+        .await
+        .with_context(|| format!("grind: staging session {seq} changes"))?;
+
+    let has_staged = git
+        .has_staged_changes()
+        .await
+        .with_context(|| format!("grind: checking staged changes for session {seq}"))?;
+    if !has_staged {
+        debug!(seq, prompt = %prompt.meta.name, "grind: no code changes to commit");
+        return Ok(None);
+    }
+
+    let message = format!(
+        "[pitboss/grind] {} session-{:04} ({})",
+        prompt.meta.name, seq, run_id,
+    );
+    let id = git
+        .commit(&message)
+        .await
+        .with_context(|| format!("grind: committing session {seq}"))?;
+    Ok(Some(id))
+}
+
+/// Auto-detect the project's test runner and run it once. Returns
+/// [`SessionStatus::Ok`] when tests pass and [`SessionStatus::Error`] when
+/// they fail. Reuse of the existing fixer cycle is deferred (see
+/// `deferred.md`).
+async fn verify_session(
+    seq: u32,
+    prompt: &PromptDoc,
+    workdir: &Path,
+    override_command: Option<&str>,
+    transcript_path: &Path,
+) -> Result<SessionStatus> {
+    let Some(runner) = project_tests::detect(workdir, override_command) else {
+        debug!(
+            seq,
+            prompt = %prompt.meta.name,
+            "grind: verify requested but no test runner detected"
+        );
+        return Ok(SessionStatus::Ok);
+    };
+    let verify_log = transcript_path.with_extension("verify.log");
+    let outcome = runner
+        .run(verify_log)
+        .await
+        .with_context(|| format!("grind: verify run for session {seq}"))?;
+    if outcome.passed {
+        Ok(SessionStatus::Ok)
+    } else {
+        warn!(
+            seq,
+            prompt = %prompt.meta.name,
+            summary = %outcome.summary,
+            "grind: verify failed"
+        );
+        Ok(SessionStatus::Error)
+    }
+}
+
+async fn dispatch_agent<A: Agent + ?Sized>(
+    agent: &A,
+    request: AgentRequest,
+    cancel: &CancellationToken,
+) -> Result<AgentDispatch> {
+    let (events_tx, mut events_rx) = mpsc::channel::<AgentEvent>(64);
+    let cancel_clone = cancel.clone();
+    let drain_task = tokio::spawn(async move {
+        while events_rx.recv().await.is_some() {
+            // Phase 13 wires these into the TUI; for now we drop them so
+            // the channel doesn't apply backpressure on the agent.
+        }
+    });
+
+    let outcome = agent
+        .run(request, events_tx, cancel_clone)
+        .await
+        .context("grind: agent dispatch failed")?;
+    let _ = drain_task.await;
+
+    Ok(AgentDispatch {
+        stop_reason: outcome.stop_reason,
+        tokens: outcome.tokens,
+    })
 }
 
 struct AgentDispatch {
@@ -949,8 +1343,9 @@ fn tail_lines(text: &str, n: usize) -> String {
     out
 }
 
-/// Format the per-run branch name. Stable so worktree branches in Phase 11
-/// can derive their names from the same prefix.
+/// Format the per-run branch name. Stable so worktree branches in
+/// [`super::worktree::session_branch_name`] derive their names from the same
+/// prefix.
 pub fn run_branch_name(run_id: &str) -> String {
     format!("pitboss/grind/{run_id}")
 }

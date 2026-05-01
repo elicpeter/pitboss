@@ -49,6 +49,21 @@ pub enum MockOp {
     },
     /// `stash_push(message)` was called.
     StashPush(String),
+    /// `add_worktree(path, branch, base_branch)` was called.
+    AddWorktree {
+        /// Worktree path passed in.
+        path: PathBuf,
+        /// New branch the worktree checked out.
+        branch: String,
+        /// Base branch the new branch was created from.
+        base_branch: String,
+    },
+    /// `remove_worktree(path)` was called.
+    RemoveWorktree(PathBuf),
+    /// `delete_branch(name)` was called.
+    DeleteBranch(String),
+    /// `merge_ff_only(source)` was called.
+    MergeFfOnly(String),
 }
 
 /// Record of a single commit in [`MockGit`]'s in-memory log.
@@ -305,6 +320,38 @@ impl Git for MockGit {
             moved = true;
         }
         Ok(moved)
+    }
+
+    async fn add_worktree(&self, path: &Path, branch: &str, base_branch: &str) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        s.ops.push(MockOp::AddWorktree {
+            path: path.to_path_buf(),
+            branch: branch.to_string(),
+            base_branch: base_branch.to_string(),
+        });
+        if !s.branches.insert(branch.to_string()) {
+            return Err(anyhow!("mock-git: branch {branch:?} already exists"));
+        }
+        Ok(())
+    }
+
+    async fn remove_worktree(&self, path: &Path) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        s.ops.push(MockOp::RemoveWorktree(path.to_path_buf()));
+        Ok(())
+    }
+
+    async fn delete_branch(&self, branch: &str) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        s.ops.push(MockOp::DeleteBranch(branch.to_string()));
+        s.branches.remove(branch);
+        Ok(())
+    }
+
+    async fn merge_ff_only(&self, source_branch: &str) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        s.ops.push(MockOp::MergeFfOnly(source_branch.to_string()));
+        Ok(())
     }
 
     async fn open_pr(&self, title: &str, body: &str) -> Result<String> {

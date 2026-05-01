@@ -295,6 +295,79 @@ impl Git for ShellGit {
         }
     }
 
+    async fn add_worktree(&self, path: &Path, branch: &str, base_branch: &str) -> Result<()> {
+        let path_str = path.to_string_lossy();
+        self.run_succeed(
+            "worktree_add",
+            &["worktree", "add", "-b", branch, &path_str, base_branch],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_worktree(&self, path: &Path) -> Result<()> {
+        let path_str = path.to_string_lossy();
+        let out = self
+            .run(
+                "worktree_remove",
+                &["worktree", "remove", "--force", &path_str],
+            )
+            .await?;
+        if out.success {
+            return Ok(());
+        }
+        // Treat "not a working tree" as a soft success: the parent may have
+        // already moved the directory aside for forensics, in which case the
+        // bookkeeping cleanup is the only thing left to do.
+        let combined = format!("{}{}", out.stdout, out.stderr);
+        let lower = combined.to_ascii_lowercase();
+        if lower.contains("is not a working tree") || lower.contains("not a working tree") {
+            self.run("worktree_prune", &["worktree", "prune"]).await?;
+            return Ok(());
+        }
+        Err(GitError::Command {
+            operation: "worktree_remove".into(),
+            exit: out.status,
+            stderr: out.stderr,
+        }
+        .into())
+    }
+
+    async fn delete_branch(&self, branch: &str) -> Result<()> {
+        let out = self
+            .run("delete_branch", &["branch", "-D", branch])
+            .await?;
+        if out.success {
+            return Ok(());
+        }
+        let combined = format!("{}{}", out.stdout, out.stderr);
+        let lower = combined.to_ascii_lowercase();
+        if lower.contains("not found") {
+            return Ok(());
+        }
+        Err(GitError::Command {
+            operation: "delete_branch".into(),
+            exit: out.status,
+            stderr: out.stderr,
+        }
+        .into())
+    }
+
+    async fn merge_ff_only(&self, source_branch: &str) -> Result<()> {
+        let out = self
+            .run("merge_ff_only", &["merge", "--ff-only", source_branch])
+            .await?;
+        if out.success {
+            return Ok(());
+        }
+        Err(GitError::Command {
+            operation: "merge_ff_only".into(),
+            exit: out.status,
+            stderr: out.stderr,
+        }
+        .into())
+    }
+
     async fn open_pr(&self, title: &str, body: &str) -> Result<String> {
         // `gh` resolves the target repository from its working directory's git
         // remotes — there is no `-C` flag, so the workspace is passed via
