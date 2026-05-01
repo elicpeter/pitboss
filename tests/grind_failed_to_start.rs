@@ -36,7 +36,7 @@ fn write_prompt(dir: &Path, file: &str, body: &str) {
 }
 
 fn seed_one_prompt(workspace: &Path) {
-    let dir = workspace.join(".pitboss").join("prompts");
+    let dir = workspace.join(".pitboss/grind/prompts");
     write_prompt(
         &dir,
         "alpha.md",
@@ -102,7 +102,7 @@ fn missing_prompts_exits_failed_to_start() {
 
 #[test]
 fn resume_with_missing_run_id_exits_failed_to_start() {
-    // No prior runs under `.pitboss/grind/` — `--resume` (with no argument)
+    // No prior runs under `.pitboss/grind/runs/` — `--resume` (with no argument)
     // cannot find a target and returns code 4. With an explicit unknown id
     // the same exit code applies.
     let work = tempdir().unwrap();

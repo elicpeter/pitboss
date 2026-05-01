@@ -414,24 +414,15 @@ mod tests {
     async fn stage_changes_records_exclusions_and_filters_working_tree() {
         let git = MockGit::new();
         git.touch("src/foo.rs");
-        git.touch("plan.md");
-        git.touch("deferred.md");
-        git.touch(".pitboss/state.json");
+        git.touch(".pitboss/play/plan.md");
+        git.touch(".pitboss/play/deferred.md");
+        git.touch(".pitboss/play/state.json");
 
-        let plan = Path::new("plan.md");
-        let deferred = Path::new("deferred.md");
         let pitboss = Path::new(".pitboss");
-        git.stage_changes(&[plan, deferred, pitboss]).await.unwrap();
+        git.stage_changes(&[pitboss]).await.unwrap();
 
         let exclusions = git.last_exclusions().unwrap();
-        assert_eq!(
-            exclusions,
-            vec![
-                PathBuf::from("plan.md"),
-                PathBuf::from("deferred.md"),
-                PathBuf::from(".pitboss"),
-            ]
-        );
+        assert_eq!(exclusions, vec![PathBuf::from(".pitboss")]);
 
         // Index should now hold only `src/foo.rs`.
         assert!(git.has_staged_changes().await.unwrap());
@@ -447,11 +438,9 @@ mod tests {
     #[tokio::test]
     async fn empty_index_path_when_only_excluded_files_changed() {
         let git = MockGit::new();
-        git.touch("plan.md");
-        git.touch(".pitboss/state.json");
-        git.stage_changes(&[Path::new("plan.md"), Path::new(".pitboss")])
-            .await
-            .unwrap();
+        git.touch(".pitboss/play/plan.md");
+        git.touch(".pitboss/play/state.json");
+        git.stage_changes(&[Path::new(".pitboss")]).await.unwrap();
         assert!(!git.has_staged_changes().await.unwrap());
     }
 

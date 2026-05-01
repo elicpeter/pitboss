@@ -4,8 +4,8 @@
 //!
 //! 1. `--prompts-dir <path>` (override). When set, project and global sources
 //!    are skipped entirely.
-//! 2. `./.pitboss/prompts/` under the project root.
-//! 3. `~/.pitboss/prompts/` in the user's home directory.
+//! 2. `./.pitboss/grind/prompts/` under the project root.
+//! 3. `~/.pitboss/grind/prompts/` in the user's home directory.
 //!
 //! Project entries shadow global entries that share a `name`. Within a single
 //! directory, files are walked in sorted filename order so duplicate-name
@@ -24,16 +24,20 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::util::paths::{grind_prompts_dir, home_grind_prompts_dir};
+
 use super::prompt::{parse_prompt_str, PromptDoc, PromptParseError, PromptSource};
 
 /// Inputs to [`discover_prompts`]. All paths are absolute or relative to the
 /// caller's current working directory; this module does not canonicalise.
 #[derive(Debug, Clone)]
 pub struct DiscoveryOptions {
-    /// Repository root. The project source is `<project_root>/.pitboss/prompts/`.
+    /// Repository root. The project source is
+    /// `<project_root>/.pitboss/grind/prompts/`.
     pub project_root: PathBuf,
     /// Optional home directory. The global source is
-    /// `<home_dir>/.pitboss/prompts/`. `None` disables the global source.
+    /// `<home_dir>/.pitboss/grind/prompts/`. `None` disables the global
+    /// source.
     pub home_dir: Option<PathBuf>,
     /// When `Some`, only this directory is consulted; project and global
     /// sources are ignored.
@@ -59,7 +63,7 @@ pub fn resolve_home_prompts_dir() -> Option<PathBuf> {
     if home.is_empty() {
         return None;
     }
-    Some(PathBuf::from(home).join(".pitboss").join("prompts"))
+    Some(home_grind_prompts_dir(PathBuf::from(home)))
 }
 
 /// Walk the configured sources and return discovered prompts plus any per-file
@@ -76,7 +80,7 @@ pub fn discover_prompts(opts: DiscoveryOptions) -> DiscoveryResult {
             &mut errors,
         );
     } else {
-        let project_dir = opts.project_root.join(".pitboss").join("prompts");
+        let project_dir = grind_prompts_dir(&opts.project_root);
         load_dir(
             &project_dir,
             PromptSource::Project,
@@ -84,7 +88,7 @@ pub fn discover_prompts(opts: DiscoveryOptions) -> DiscoveryResult {
             &mut errors,
         );
         if let Some(home) = opts.home_dir.as_deref() {
-            let global_dir = home.join(".pitboss").join("prompts");
+            let global_dir = home_grind_prompts_dir(home);
             load_dir(&global_dir, PromptSource::Global, &mut by_name, &mut errors);
         }
     }
@@ -166,11 +170,11 @@ mod tests {
     }
 
     fn project_dir(root: &Path) -> PathBuf {
-        root.join(".pitboss").join("prompts")
+        grind_prompts_dir(root)
     }
 
     fn global_dir(home: &Path) -> PathBuf {
-        home.join(".pitboss").join("prompts")
+        home_grind_prompts_dir(home)
     }
 
     #[test]
@@ -402,7 +406,10 @@ mod tests {
         // least exercise the path-construction shape when it's set.
         if let Some(home) = std::env::var_os("HOME") {
             let resolved = resolve_home_prompts_dir().expect("HOME was set");
-            assert_eq!(resolved, PathBuf::from(home).join(".pitboss/prompts"));
+            assert_eq!(
+                resolved,
+                PathBuf::from(home).join(".pitboss/grind/prompts")
+            );
         }
     }
 }

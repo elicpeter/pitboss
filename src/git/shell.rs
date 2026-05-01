@@ -334,9 +334,7 @@ impl Git for ShellGit {
     }
 
     async fn delete_branch(&self, branch: &str) -> Result<()> {
-        let out = self
-            .run("delete_branch", &["branch", "-D", branch])
-            .await?;
+        let out = self.run("delete_branch", &["branch", "-D", branch]).await?;
         if out.success {
             return Ok(());
         }
@@ -531,19 +529,19 @@ mod tests {
         // Mirror the runner's per-phase situation: the agent left planning
         // artifacts and `.pitboss/` updates in the working tree alongside one
         // real source change. Only the source change should be staged.
-        fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
-        fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
-        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
-        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss/play")).unwrap();
+        fs::write(dir.path().join(".pitboss/play/plan.md"), "plan body\n").unwrap();
+        fs::write(
+            dir.path().join(".pitboss/play/deferred.md"),
+            "deferred body\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join(".pitboss/play/state.json"), "{}\n").unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
 
-        let plan_path = Path::new("plan.md");
-        let deferred_path = Path::new("deferred.md");
         let pitboss_path = Path::new(".pitboss");
-        git.stage_changes(&[plan_path, deferred_path, pitboss_path])
-            .await
-            .unwrap();
+        git.stage_changes(&[pitboss_path]).await.unwrap();
 
         // Inspect the index directly: only `src/foo.rs` should be there.
         let staged = std::process::Command::new("git")
@@ -567,18 +565,12 @@ mod tests {
         let git = ShellGit::new(dir.path());
 
         fs::write(dir.path().join(".gitignore"), ".pitboss/\n").unwrap();
-        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
-        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss/play")).unwrap();
+        fs::write(dir.path().join(".pitboss/play/state.json"), "{}\n").unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
 
-        git.stage_changes(&[
-            Path::new("plan.md"),
-            Path::new("deferred.md"),
-            Path::new(".pitboss"),
-        ])
-        .await
-        .unwrap();
+        git.stage_changes(&[Path::new(".pitboss")]).await.unwrap();
 
         let staged = std::process::Command::new("git")
             .args(["-C"])
@@ -612,24 +604,22 @@ mod tests {
 
     #[tokio::test]
     async fn empty_commit_path_when_only_excluded_files_changed() {
-        // The runner contract: if the agent only modified `.pitboss/`,
-        // `plan.md`, or `deferred.md`, `stage_changes` finds nothing to stage
-        // and `has_staged_changes` returns false. Runner skips commit.
+        // The runner contract: if the agent only modified files under
+        // `.pitboss/`, `stage_changes` finds nothing to stage and
+        // `has_staged_changes` returns false. Runner skips commit.
         let dir = fresh_repo().await;
         let git = ShellGit::new(dir.path());
 
-        fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
-        fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
-        fs::create_dir_all(dir.path().join(".pitboss")).unwrap();
-        fs::write(dir.path().join(".pitboss/state.json"), "{}\n").unwrap();
-
-        git.stage_changes(&[
-            Path::new("plan.md"),
-            Path::new("deferred.md"),
-            Path::new(".pitboss"),
-        ])
-        .await
+        fs::create_dir_all(dir.path().join(".pitboss/play")).unwrap();
+        fs::write(dir.path().join(".pitboss/play/plan.md"), "plan body\n").unwrap();
+        fs::write(
+            dir.path().join(".pitboss/play/deferred.md"),
+            "deferred body\n",
+        )
         .unwrap();
+        fs::write(dir.path().join(".pitboss/play/state.json"), "{}\n").unwrap();
+
+        git.stage_changes(&[Path::new(".pitboss")]).await.unwrap();
 
         assert!(
             !git.has_staged_changes().await.unwrap(),
@@ -731,17 +721,16 @@ mod tests {
 
         // Mirror the runner's pre-audit setup: implementer touched both
         // planning artifacts and code; only code should make it into the diff.
-        fs::write(dir.path().join("plan.md"), "plan body\n").unwrap();
-        fs::write(dir.path().join("deferred.md"), "deferred body\n").unwrap();
+        fs::create_dir_all(dir.path().join(".pitboss/play")).unwrap();
+        fs::write(dir.path().join(".pitboss/play/plan.md"), "plan body\n").unwrap();
+        fs::write(
+            dir.path().join(".pitboss/play/deferred.md"),
+            "deferred body\n",
+        )
+        .unwrap();
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/foo.rs"), "fn main() {}\n").unwrap();
-        git.stage_changes(&[
-            Path::new("plan.md"),
-            Path::new("deferred.md"),
-            Path::new(".pitboss"),
-        ])
-        .await
-        .unwrap();
+        git.stage_changes(&[Path::new(".pitboss")]).await.unwrap();
 
         let diff = git.staged_diff().await.unwrap();
         assert!(diff.contains("src/foo.rs"), "diff: {diff}");

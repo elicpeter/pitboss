@@ -1,8 +1,8 @@
 //! Integration tests for `pitboss prompts {ls, validate, new}` (phase 03).
 //!
 //! Drives the binary via `assert_cmd` against a temp workspace. Each test
-//! points `HOME` at its own temp dir so the user's real `~/.pitboss/prompts/`
-//! cannot leak into discovery.
+//! points `HOME` at its own temp dir so the user's real
+//! `~/.pitboss/grind/prompts/` cannot leak into discovery.
 
 use std::fs;
 use std::path::Path;
@@ -58,7 +58,7 @@ fn ls_renders_table_with_discovered_prompts() {
     let work = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    let project_dir = work.path().join(".pitboss").join("prompts");
+    let project_dir = work.path().join(".pitboss/grind/prompts");
     write_prompt(
         &project_dir,
         "alpha.md",
@@ -104,7 +104,7 @@ fn validate_reports_each_bad_file_and_exits_nonzero() {
     let work = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    let dir = work.path().join(".pitboss").join("prompts");
+    let dir = work.path().join(".pitboss/grind/prompts");
     write_prompt(
         &dir,
         "good.md",
@@ -154,13 +154,9 @@ fn new_creates_project_prompt_and_refuses_to_overwrite() {
         .assert()
         .success()
         .stdout(contains("created"))
-        .stdout(contains(".pitboss/prompts/fp-hunter.md"));
+        .stdout(contains(".pitboss/grind/prompts/fp-hunter.md"));
 
-    let target = work
-        .path()
-        .join(".pitboss")
-        .join("prompts")
-        .join("fp-hunter.md");
+    let target = work.path().join(".pitboss/grind/prompts/fp-hunter.md");
     assert!(target.exists(), "new should write the file");
     let body = fs::read_to_string(&target).unwrap();
     assert!(body.contains("name: fp-hunter"), "body: {body}");
@@ -190,20 +186,12 @@ fn new_global_writes_under_home_pitboss_prompts() {
         .assert()
         .success();
 
-    let target = home
-        .path()
-        .join(".pitboss")
-        .join("prompts")
-        .join("triage.md");
+    let target = home.path().join(".pitboss/grind/prompts/triage.md");
     assert!(
         target.exists(),
-        "global new should write under $HOME/.pitboss/prompts"
+        "global new should write under $HOME/.pitboss/grind/prompts"
     );
-    let project_target = work
-        .path()
-        .join(".pitboss")
-        .join("prompts")
-        .join("triage.md");
+    let project_target = work.path().join(".pitboss/grind/prompts/triage.md");
     assert!(
         !project_target.exists(),
         "global new must not touch the project prompts dir"

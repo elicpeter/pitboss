@@ -250,7 +250,11 @@ invariant, fix it only when you can articulate why in a comment.
 
 /// Render the grind fixer prompt for a failing verify cycle. Public for
 /// snapshot tests; not part of the supported API surface.
-pub fn render_grind_fixer_prompt(prompt_name: &str, prompt_body: &str, test_output: &str) -> String {
+pub fn render_grind_fixer_prompt(
+    prompt_name: &str,
+    prompt_body: &str,
+    test_output: &str,
+) -> String {
     GRIND_FIXER_PROMPT_TEMPLATE
         .replace("{prompt_name}", prompt_name)
         .replace("{prompt_body}", prompt_body)
@@ -341,7 +345,7 @@ pub enum GrindStopReason {
 /// Outcome of a full [`GrindRunner::run`] invocation.
 #[derive(Debug, Clone)]
 pub struct GrindRunOutcome {
-    /// The id of the run on disk under `.pitboss/grind/<run-id>/`.
+    /// The id of the run on disk under `.pitboss/grind/runs/<run-id>/`.
     pub run_id: String,
     /// The git branch the runner committed on.
     pub branch: String,
@@ -385,7 +389,7 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
     /// created the per-run branch and checked it out.
     ///
     /// `budgets` holds the run-wide caps already resolved from
-    /// `pitboss.toml`'s `[grind.budgets]`, the plan's `PlanBudgets`, and any
+    /// `config.toml`'s `[grind.budgets]`, the plan's `PlanBudgets`, and any
     /// CLI overrides via [`crate::grind::resolve_budgets`].
     /// `consecutive_failure_limit` defaults to
     /// [`crate::config::GrindConfig::consecutive_failure_limit`] (`3`) and
@@ -481,7 +485,7 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
         &self.workspace
     }
 
-    /// Run id under `.pitboss/grind/<run-id>/`.
+    /// Run id under `.pitboss/grind/runs/<run-id>/`.
     pub fn run_id(&self) -> &str {
         &self.run_id
     }
@@ -502,7 +506,7 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
         self.started_at
     }
 
-    /// Borrow the run-wide budgets (resolved from `pitboss.toml`, plan, and
+    /// Borrow the run-wide budgets (resolved from `config.toml`, plan, and
     /// CLI flags before the runner was built). The TUI footer reads this for
     /// the budget headers.
     pub fn budgets(&self) -> &PlanBudgets {
@@ -763,13 +767,7 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
             };
             match res {
                 Ok(Ok(rec)) => {
-                    self.handle_completion(
-                        rec,
-                        sessions,
-                        tracker,
-                        max_completed_seq,
-                        warn_flags,
-                    )?
+                    self.handle_completion(rec, sessions, tracker, max_completed_seq, warn_flags)?
                 }
                 Ok(Err(e)) => return Err(e),
                 Err(je) => return Err(anyhow::anyhow!("session task panicked: {je}")),
@@ -798,9 +796,9 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
             .append(&record)
             .with_context(|| format!("grind: appending session {seq} record to log"))?;
         tracker.record_session(&record);
-        let _ = self
-            .events_tx
-            .send(GrindEvent::SessionFinished { record: record.clone() });
+        let _ = self.events_tx.send(GrindEvent::SessionFinished {
+            record: record.clone(),
+        });
         if seq > *max_completed_seq {
             *max_completed_seq = seq;
         }
@@ -982,12 +980,7 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
         last_session_seq: u32,
         status: RunStatus,
     ) -> Result<()> {
-        let prompt_names: Vec<String> = self
-            .plan
-            .prompts
-            .iter()
-            .map(|p| p.name.clone())
-            .collect();
+        let prompt_names: Vec<String> = self.plan.prompts.iter().map(|p| p.name.clone()).collect();
         let state = build_state(
             self.run_id.clone(),
             self.branch.clone(),
@@ -1238,9 +1231,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
             // them share the cargo cache instead of paying a full rebuild
             // per worktree. Sequential sessions live in the main workspace
             // already, so the override is unnecessary.
-            let shared_target_dir = worktree
-                .as_ref()
-                .map(|_| repo_root.join("target"));
+            let shared_target_dir = worktree.as_ref().map(|_| repo_root.join("target"));
             let verify = verify_with_fixer_loop(
                 seq,
                 &prompt,
@@ -1299,7 +1290,10 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
                 _ => None,
             };
             let stash_label = format!("grind/{}/session-{:04}-leftover", run_id, seq);
-            match repo_git.stash_push(&stash_label, &sequential_exclusions).await {
+            match repo_git
+                .stash_push(&stash_label, &sequential_exclusions)
+                .await
+            {
                 Ok(true) => {
                     warn!(
                         run_id = %run_id,
@@ -1591,7 +1585,12 @@ async fn verify_with_fixer_loop<A: Agent + ?Sized>(
             entry.input = entry.input.saturating_add(v.input);
             entry.output = entry.output.saturating_add(v.output);
         }
-        total_cost += session_cost_usd(config, &model, dispatch.tokens.input, dispatch.tokens.output);
+        total_cost += session_cost_usd(
+            config,
+            &model,
+            dispatch.tokens.input,
+            dispatch.tokens.output,
+        );
 
         match &dispatch.stop_reason {
             StopReason::Completed => {}
@@ -1635,12 +1634,9 @@ async fn verify_with_fixer_loop<A: Agent + ?Sized>(
         }
 
         let attempt_log = transcript_path.with_extension(format!("verify-{:02}.log", attempt));
-        outcome = test_runner
-            .run(attempt_log)
-            .await
-            .with_context(|| {
-                format!("grind: verify re-run after fixer attempt {attempt} for session {seq}")
-            })?;
+        outcome = test_runner.run(attempt_log).await.with_context(|| {
+            format!("grind: verify re-run after fixer attempt {attempt} for session {seq}")
+        })?;
         if outcome.passed {
             info!(
                 seq,

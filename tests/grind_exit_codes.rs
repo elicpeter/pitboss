@@ -482,8 +482,7 @@ async fn aborted_when_shutdown_abort_fires_during_dispatch() {
 
     let shutdown = GrindShutdown::new();
     let runner_shutdown = shutdown.clone();
-    let runner_handle =
-        tokio::spawn(async move { runner.run(runner_shutdown).await.unwrap() });
+    let runner_handle = tokio::spawn(async move { runner.run(runner_shutdown).await.unwrap() });
 
     // Wait until dispatch 1 reports it has reached the gate, *then* abort.
     // The gate-await is racing the cancel token in the agent body, so the

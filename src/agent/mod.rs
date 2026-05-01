@@ -8,7 +8,7 @@
 //! ## Shape
 //!
 //! - [`AgentRequest`] is the per-dispatch input. Composed once by the runner
-//!   from `pitboss.toml`, the active phase, and the prompt template.
+//!   from `config.toml`, the active phase, and the prompt template.
 //! - [`AgentEvent`] is streamed on the caller-supplied
 //!   [`tokio::sync::mpsc::Sender`] while the agent runs. Events are best-effort
 //!   — if the receiver is dropped, the agent keeps running and continues to
@@ -43,7 +43,7 @@ pub use subprocess::{run_logged, run_logged_with_stdin, SubprocessOutcome};
 
 /// Which agent role is being dispatched.
 ///
-/// Round-trips through serde as the lowercase string used in `pitboss.toml`'s
+/// Round-trips through serde as the lowercase string used in `config.toml`'s
 /// `[models]` keys, so a single source of truth covers config and runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -59,7 +59,7 @@ pub enum Role {
 }
 
 impl Role {
-    /// String name matching the `pitboss.toml` `[models]` key. Stable.
+    /// String name matching the `config.toml` `[models]` key. Stable.
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Planner => "planner",
@@ -199,7 +199,7 @@ impl<A: Agent + ?Sized> Agent for Box<A> {
 }
 
 /// Construct the agent the runner should dispatch through, based on
-/// `pitboss.toml`'s `[agent] backend` selector.
+/// `config.toml`'s `[agent] backend` selector.
 ///
 /// A missing or absent `backend` falls back to [`backend::BackendKind::default`]
 /// (Claude Code) so workspaces without an `[agent]` section keep today's

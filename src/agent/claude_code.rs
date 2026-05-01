@@ -17,7 +17,7 @@
 //! `acceptEdits` so headless runs can still apply file edits without a human
 //! to answer the prompt. To force a specific mode regardless of model,
 //! construct the agent with [`ClaudeCodeAgent::with_permission_mode`] or set
-//! `[agent.claude_code] permission_mode` in `pitboss.toml`.
+//! `[agent.claude_code] permission_mode` in `config.toml`.
 //!
 //! ## Event mapping
 //!
@@ -106,7 +106,7 @@ impl ClaudeCodeAgent {
 
     /// Append extra argv that gets spliced in just before the positional `--`
     /// prompt sigil on every invocation. Mirrors `[agent.claude_code]
-    /// extra_args` in `pitboss.toml`.
+    /// extra_args` in `config.toml`.
     pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
         self.extra_args = args;
         self

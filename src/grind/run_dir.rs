@@ -1,7 +1,7 @@
 //! On-disk layout for a single grind run, plus thread-safe writers for the
 //! session log and a read-only handle for the agent-owned scratchpad.
 //!
-//! A run lives at `.pitboss/grind/<run-id>/` and owns:
+//! A run lives at `.pitboss/grind/runs/<run-id>/` and owns:
 //!
 //! - `state.json` — scheduler/budget snapshot written by phase 09.
 //! - `sessions.jsonl` — append-only source of truth for session records.
@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::git::CommitId;
 use crate::state::TokenUsage;
+use crate::util::paths::grind_run_dir;
 use crate::util::write_atomic;
 
 /// File and directory names that make up a run directory. Centralized so the
@@ -43,7 +44,7 @@ pub const WORKTREES_DIR: &str = "worktrees";
 /// session log, scratchpad, and (later) state writer all carry their own copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunPaths {
-    /// `<repo>/.pitboss/grind/<run-id>/`.
+    /// `<repo>/.pitboss/grind/runs/<run-id>/`.
     pub root: PathBuf,
     /// `<root>/state.json`.
     pub state: PathBuf,
@@ -62,7 +63,7 @@ pub struct RunPaths {
 impl RunPaths {
     /// Build the path set for a run id under `repo_root`. Performs no IO.
     pub fn for_run(repo_root: &Path, run_id: &str) -> Self {
-        let root = repo_root.join(".pitboss").join("grind").join(run_id);
+        let root = grind_run_dir(repo_root, run_id);
         Self {
             state: root.join(STATE_FILENAME),
             sessions_jsonl: root.join(SESSIONS_JSONL),
@@ -516,7 +517,10 @@ mod tests {
         let repo = tempdir().unwrap();
         RunDir::create(repo.path(), "rid").unwrap();
         let opened = RunDir::open(repo.path(), "rid").unwrap();
-        assert_eq!(opened.paths().root, repo.path().join(".pitboss/grind/rid"));
+        assert_eq!(
+            opened.paths().root,
+            repo.path().join(".pitboss/grind/runs/rid")
+        );
     }
 
     #[test]
@@ -602,7 +606,7 @@ mod tests {
         let p = RunPaths::for_run(Path::new("/tmp/repo"), "rid");
         assert_eq!(
             p.transcript_for(7),
-            Path::new("/tmp/repo/.pitboss/grind/rid/transcripts/session-0007.log")
+            Path::new("/tmp/repo/.pitboss/grind/runs/rid/transcripts/session-0007.log")
         );
     }
 

@@ -75,11 +75,21 @@ impl Agent for MockAgent {
         fs::write(&req.log_path, existing).ok();
 
         // Drop a marker file so the session has something to commit.
-        let prompt_name = req.env.get("PITBOSS_PROMPT_NAME").cloned().unwrap_or_default();
-        let seq = req.env.get("PITBOSS_SESSION_SEQ").cloned().unwrap_or_default();
-        let marker = req
-            .workdir
-            .join(format!("src/hooks_mock_{}_{}.rs", seq, prompt_name.replace('-', "_")));
+        let prompt_name = req
+            .env
+            .get("PITBOSS_PROMPT_NAME")
+            .cloned()
+            .unwrap_or_default();
+        let seq = req
+            .env
+            .get("PITBOSS_SESSION_SEQ")
+            .cloned()
+            .unwrap_or_default();
+        let marker = req.workdir.join(format!(
+            "src/hooks_mock_{}_{}.rs",
+            seq,
+            prompt_name.replace('-', "_")
+        ));
         if let Some(parent) = marker.parent() {
             fs::create_dir_all(parent).ok();
         }
@@ -92,10 +102,7 @@ impl Agent for MockAgent {
         }
         fs::write(&summary_file, format!("ran session {seq}")).ok();
 
-        let stop = self
-            .stop_override
-            .clone()
-            .unwrap_or(StopReason::Completed);
+        let stop = self.stop_override.clone().unwrap_or(StopReason::Completed);
         let exit_code = if matches!(stop, StopReason::Completed) {
             0
         } else {
@@ -144,7 +151,10 @@ fn init_git_repo(dir: &Path) {
         .status()
         .expect("git init");
     assert!(status.success());
-    for (k, v) in [("user.name", "pitboss-test"), ("user.email", "pitboss@test")] {
+    for (k, v) in [
+        ("user.name", "pitboss-test"),
+        ("user.email", "pitboss@test"),
+    ] {
         Command::new("git")
             .args(["-C"])
             .arg(dir)
@@ -297,11 +307,14 @@ async fn pre_and_post_session_hooks_each_fire_once_per_session() {
     );
     let workspace_str = workspace.display().to_string();
     assert!(
-        pre_body.lines().all(|l| l.starts_with("pre alpha wt=")
-            && l.contains(workspace_str.as_str())),
+        pre_body
+            .lines()
+            .all(|l| l.starts_with("pre alpha wt=") && l.contains(workspace_str.as_str())),
         "pre marker missing PITBOSS_WORKTREE = workspace ({workspace_str}): {pre_body:?}"
     );
-    assert!(post_body.lines().all(|l| l.starts_with("post ok ran session")));
+    assert!(post_body
+        .lines()
+        .all(|l| l.starts_with("post ok ran session")));
 
     // Captured banners and prefixed output land in the per-session transcript.
     let transcript = fs::read_to_string(transcript_dir.join("session-0001.log")).unwrap();
@@ -410,7 +423,10 @@ async fn on_failure_does_not_run_for_ok_session() {
     let hooks = Hooks {
         pre_session: None,
         post_session: None,
-        on_failure: Some(format!("echo should-not-run >> {}", on_failure_marker.display())),
+        on_failure: Some(format!(
+            "echo should-not-run >> {}",
+            on_failure_marker.display()
+        )),
     };
 
     let Built {

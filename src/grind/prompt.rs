@@ -18,9 +18,9 @@ use thiserror::Error;
 /// discovery (override > project > global).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromptSource {
-    /// `./.pitboss/prompts/<name>.md` inside the current repo.
+    /// `./.pitboss/grind/prompts/<name>.md` inside the current repo.
     Project,
-    /// `~/.pitboss/prompts/<name>.md` in the user's home directory.
+    /// `~/.pitboss/grind/prompts/<name>.md` in the user's home directory.
     Global,
     /// Explicit `--prompts-dir <path>` override on the command line.
     Override,

@@ -23,6 +23,7 @@ use crate::grind::{
     PromptSource,
 };
 use crate::style::{self, col};
+use crate::util::paths::grind_prompts_dir;
 use crate::util::write_atomic;
 
 /// Arguments for `pitboss prompts <action>`.
@@ -47,11 +48,11 @@ pub enum PromptsAction {
         /// `name:` field in the template.
         name: String,
         /// Override the destination directory. When set, neither
-        /// `.pitboss/prompts/` nor `~/.pitboss/prompts/` is used.
+        /// `.pitboss/grind/prompts/` nor `~/.pitboss/grind/prompts/` is used.
         #[arg(long = "dir")]
         dir: Option<PathBuf>,
-        /// Write into `~/.pitboss/prompts/` instead of the project's
-        /// `.pitboss/prompts/` directory.
+        /// Write into `~/.pitboss/grind/prompts/` instead of the project's
+        /// `.pitboss/grind/prompts/` directory.
         #[arg(long, conflicts_with = "dir")]
         global: bool,
     },
@@ -162,11 +163,11 @@ fn resolve_target_dir(
     if global {
         return resolve_home_prompts_dir().ok_or_else(|| {
             anyhow::anyhow!(
-                "prompts new --global: HOME is unset; cannot locate ~/.pitboss/prompts/"
+                "prompts new --global: HOME is unset; cannot locate ~/.pitboss/grind/prompts/"
             )
         });
     }
-    Ok(workspace.join(".pitboss").join("prompts"))
+    Ok(grind_prompts_dir(workspace))
 }
 
 fn default_options(workspace: &Path) -> DiscoveryOptions {

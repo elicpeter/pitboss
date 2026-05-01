@@ -383,7 +383,7 @@ async fn run_directory_layout_matches_spec() {
     runner.run(shutdown).await.unwrap();
     let _ = watcher.await;
 
-    let root = dir.path().join(".pitboss/grind").join(RUN_ID);
+    let root = dir.path().join(".pitboss/grind/runs").join(RUN_ID);
     assert!(root.is_dir(), "run root must exist: {:?}", root);
     assert!(root.join("sessions.jsonl").is_file());
     assert!(root.join("sessions.md").is_file());
@@ -451,8 +451,7 @@ async fn drain_after_session_two_skips_session_three() {
     // Drive runner concurrently so the test thread can step it through
     // sessions one at a time.
     let runner_shutdown = shutdown.clone();
-    let runner_handle =
-        tokio::spawn(async move { runner.run(runner_shutdown).await.unwrap() });
+    let runner_handle = tokio::spawn(async move { runner.run(runner_shutdown).await.unwrap() });
 
     // Step session 1: receive the entry signal, then release.
     let n1 = started_rx.recv().await.expect("session 1 start signal");

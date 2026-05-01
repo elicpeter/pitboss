@@ -34,7 +34,7 @@ fn write_prompt(dir: &Path, file: &str, body: &str) {
 }
 
 fn seed_one_prompt(workspace: &Path) {
-    let dir = workspace.join(".pitboss").join("prompts");
+    let dir = workspace.join(".pitboss/grind/prompts");
     write_prompt(
         &dir,
         "alpha.md",

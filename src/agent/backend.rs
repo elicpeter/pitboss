@@ -1,7 +1,7 @@
 //! Backend selection: which underlying agent CLI pitboss should drive.
 //!
 //! The enum is the in-memory form of the `agent.backend` key in
-//! `pitboss.toml`. All four variants are wired through [`super::build_agent`]
+//! `config.toml`. All four variants are wired through [`super::build_agent`]
 //! as concrete adapters: [`BackendKind::ClaudeCode`] is the default, and
 //! [`BackendKind::Codex`], [`BackendKind::Aider`], and [`BackendKind::Gemini`]
 //! cover the other supported coding-agent CLIs. Per-backend overrides
@@ -20,7 +20,7 @@ use anyhow::anyhow;
 /// Which underlying agent backend pitboss should drive.
 ///
 /// Round-trips through [`fmt::Display`] / [`FromStr`] as the canonical lowercase
-/// underscored string used in `pitboss.toml` (`claude_code`, `codex`, `aider`,
+/// underscored string used in `config.toml` (`claude_code`, `codex`, `aider`,
 /// `gemini`). [`Self::default`] is [`Self::ClaudeCode`], so a workspace with
 /// no `[agent]` section keeps today's behavior.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,7 +37,7 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    /// Canonical lowercase string form, matching `pitboss.toml`'s
+    /// Canonical lowercase string form, matching `config.toml`'s
     /// `agent.backend` value.
     pub fn as_str(self) -> &'static str {
         match self {

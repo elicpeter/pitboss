@@ -22,22 +22,28 @@ fn fresh_init_creates_every_artifact() {
         .current_dir(dir.path())
         .assert()
         .success()
-        .stdout(contains("created plan.md"))
-        .stdout(contains("created deferred.md"))
-        .stdout(contains("created pitboss.toml"))
-        .stdout(contains("created .pitboss/"))
-        .stdout(contains("created .pitboss/snapshots/"))
-        .stdout(contains("created .pitboss/logs/"))
-        .stdout(contains("created .pitboss/state.json"));
+        .stdout(contains("created .pitboss/play/plan.md"))
+        .stdout(contains("created .pitboss/play/deferred.md"))
+        .stdout(contains("created .pitboss/config.toml"))
+        .stdout(contains("created .pitboss/play/snapshots/"))
+        .stdout(contains("created .pitboss/play/logs/"))
+        .stdout(contains("created .pitboss/play/state.json"))
+        .stdout(contains("created .pitboss/grind/prompts/"))
+        .stdout(contains("created .pitboss/grind/rotations/"))
+        .stdout(contains("created .pitboss/grind/runs/"));
 
     for rel in [
-        "plan.md",
-        "deferred.md",
-        "pitboss.toml",
         ".pitboss",
-        ".pitboss/snapshots",
-        ".pitboss/logs",
-        ".pitboss/state.json",
+        ".pitboss/config.toml",
+        ".pitboss/play",
+        ".pitboss/play/plan.md",
+        ".pitboss/play/deferred.md",
+        ".pitboss/play/state.json",
+        ".pitboss/play/snapshots",
+        ".pitboss/play/logs",
+        ".pitboss/grind/prompts",
+        ".pitboss/grind/rotations",
+        ".pitboss/grind/runs",
         ".gitignore",
     ] {
         assert!(
@@ -59,10 +65,10 @@ fn rerun_init_is_idempotent_and_prints_skipped() {
         .success();
 
     let snapshot_paths = [
-        "plan.md",
-        "deferred.md",
-        "pitboss.toml",
-        ".pitboss/state.json",
+        ".pitboss/config.toml",
+        ".pitboss/play/plan.md",
+        ".pitboss/play/deferred.md",
+        ".pitboss/play/state.json",
         ".gitignore",
     ];
     let before: Vec<Vec<u8>> = snapshot_paths
@@ -75,10 +81,14 @@ fn rerun_init_is_idempotent_and_prints_skipped() {
         .current_dir(dir.path())
         .assert()
         .success()
-        .stdout(contains("skipped plan.md (already exists)"))
-        .stdout(contains("skipped deferred.md (already exists)"))
-        .stdout(contains("skipped pitboss.toml (already exists)"))
-        .stdout(contains("skipped .pitboss/state.json (already exists)"))
+        .stdout(contains("skipped .pitboss/play/plan.md (already exists)"))
+        .stdout(contains(
+            "skipped .pitboss/play/deferred.md (already exists)",
+        ))
+        .stdout(contains("skipped .pitboss/config.toml (already exists)"))
+        .stdout(contains(
+            "skipped .pitboss/play/state.json (already exists)",
+        ))
         .stdout(contains("skipped .gitignore (already exists)"));
 
     let after: Vec<Vec<u8>> = snapshot_paths
@@ -92,19 +102,21 @@ fn rerun_init_is_idempotent_and_prints_skipped() {
 fn preexisting_plan_md_survives_byte_for_byte_with_warning_on_stderr() {
     let dir = tempdir().unwrap();
     let custom = "---\ncurrent_phase: \"05\"\n---\n\n# Phase 05: Custom\n\nhand-written body.\n";
-    fs::write(dir.path().join("plan.md"), custom).unwrap();
+    let plan_path = dir.path().join(".pitboss/play/plan.md");
+    fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+    fs::write(&plan_path, custom).unwrap();
 
     pitboss()
         .arg("init")
         .current_dir(dir.path())
         .assert()
         .success()
-        .stdout(contains("skipped plan.md (already exists)"))
+        .stdout(contains("skipped .pitboss/play/plan.md (already exists)"))
         .stderr(contains(
-            "warning: plan.md already exists, leaving it alone",
+            "warning: .pitboss/play/plan.md already exists, leaving it alone",
         ));
 
-    let after = fs::read_to_string(dir.path().join("plan.md")).unwrap();
+    let after = fs::read_to_string(&plan_path).unwrap();
     assert_eq!(after, custom, "init must not touch a pre-existing plan.md");
 }
 

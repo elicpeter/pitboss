@@ -1,5 +1,7 @@
 //! Small utilities shared across modules.
 
+pub mod paths;
+
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;

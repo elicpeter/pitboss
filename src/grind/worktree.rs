@@ -189,9 +189,8 @@ impl SessionWorktree {
                 .with_context(|| format!("worktree: clearing stale {:?}", dest))?;
         }
         if self.path.exists() {
-            std::fs::rename(&self.path, &dest).with_context(|| {
-                format!("worktree: quarantining {:?} to {:?}", self.path, dest)
-            })?;
+            std::fs::rename(&self.path, &dest)
+                .with_context(|| format!("worktree: quarantining {:?} to {:?}", self.path, dest))?;
         }
         // The directory is gone from the worktree's recorded path; tell git to
         // forget it. `remove_worktree` accepts an already-missing path.
@@ -702,9 +701,15 @@ mod tests {
             .collect();
         assert_eq!(removes.len(), 3);
         assert_eq!(deletes.len(), 3);
-        assert!(deletes.iter().any(|b| *b == "pitboss/grind/rid-session-0003"));
-        assert!(deletes.iter().any(|b| *b == "pitboss/grind/rid-session-0004"));
-        assert!(deletes.iter().any(|b| *b == "pitboss/grind/rid-session-0005"));
+        assert!(deletes
+            .iter()
+            .any(|b| *b == "pitboss/grind/rid-session-0003"));
+        assert!(deletes
+            .iter()
+            .any(|b| *b == "pitboss/grind/rid-session-0004"));
+        assert!(deletes
+            .iter()
+            .any(|b| *b == "pitboss/grind/rid-session-0005"));
     }
 
     #[tokio::test]

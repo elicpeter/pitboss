@@ -2,7 +2,7 @@
 //!
 //! Three kinds — [`HookKind::PreSession`], [`HookKind::PostSession`], and
 //! [`HookKind::OnFailure`] — load from the plan's `[hooks]` table (or
-//! inherit from `[grind.hooks]` in `pitboss.toml`) and run as
+//! inherit from `[grind.hooks]` in `config.toml`) and run as
 //! `sh -c "<cmd>"` children of the pitboss process.
 //!
 //! Each hook receives the same env vars the agent sees plus
@@ -33,7 +33,7 @@ use tokio::fs::OpenOptions;
 /// for tools that decode bytes (`LANG`), an interactive shell to defer to
 /// (`SHELL`), and the user's running ssh-agent (`SSH_AUTH_SOCK`). Anything
 /// else (credentials, custom tooling) is opt-in via
-/// `[grind] hook_env_passthrough` in `pitboss.toml`.
+/// `[grind] hook_env_passthrough` in `config.toml`.
 pub const DEFAULT_HOOK_ENV_PASSTHROUGH: &[&str] =
     &["HOME", "USER", "LANG", "SHELL", "SSH_AUTH_SOCK"];
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -256,8 +256,7 @@ async fn open_transcript(path: &Path) -> SharedLog {
 async fn write_banner_open(log: &SharedLog, label: &str, cmd: &str) {
     let Some(log) = log.as_ref() else { return };
     let ts = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let banner =
-        format!("\n=== pitboss hook: {label} (cmd: {cmd}) [start {ts}] ===\n");
+    let banner = format!("\n=== pitboss hook: {label} (cmd: {cmd}) [start {ts}] ===\n");
     let mut f = log.lock().await;
     let _ = f.write_all(banner.as_bytes()).await;
     let _ = f.flush().await;

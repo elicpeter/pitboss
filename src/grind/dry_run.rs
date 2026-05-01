@@ -53,7 +53,7 @@ pub struct DryRunInputs<'a> {
     pub prompts: &'a [PromptDoc],
     /// The selected plan, after defaulting / file load and validation.
     pub plan: &'a GrindPlan,
-    /// Run-level budgets after layering pitboss.toml `[grind.budgets]`, the
+    /// Run-level budgets after layering config.toml `[grind.budgets]`, the
     /// plan's `PlanBudgets`, and any CLI overrides.
     pub budgets: &'a PlanBudgets,
     /// Maximum number of consecutive failed sessions before the
@@ -235,11 +235,7 @@ pub fn render_dry_run_report(inputs: &DryRunInputs<'_>) -> String {
 /// Run the scheduler `count` times against a fresh state and return the
 /// picked prompt name (or `None` for a rotation that yields nothing). Used by
 /// the dry-run report and by tests that want to introspect the rotation.
-pub fn preview_picks(
-    plan: &GrindPlan,
-    prompts: &[PromptDoc],
-    count: usize,
-) -> Vec<Option<String>> {
+pub fn preview_picks(plan: &GrindPlan, prompts: &[PromptDoc], count: usize) -> Vec<Option<String>> {
     preview_picks_from_state(plan, prompts, None, count)
 }
 
@@ -419,10 +415,7 @@ mod tests {
         // `--dry-run --resume` should surface the resume target, the consumed
         // budget snapshot, and a scheduler preview seeded from the persisted
         // state — not a fresh rotation.
-        let prompts = vec![
-            fixture_prompt("alpha", 2, 1),
-            fixture_prompt("bravo", 1, 1),
-        ];
+        let prompts = vec![fixture_prompt("alpha", 2, 1), fixture_prompt("bravo", 1, 1)];
         let plan = fixture_plan(&prompts);
         let budgets = PlanBudgets {
             max_iterations: Some(50),

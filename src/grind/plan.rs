@@ -1,12 +1,13 @@
-//! Grind plan files plus the synthesized default plan.
+//! Grind rotation files plus the synthesized default rotation.
 //!
-//! A grind plan pins which prompts participate in a rotation, applies per-plan
-//! overrides on top of frontmatter defaults, and carries the hooks and budgets
-//! the runner enforces. Plans live at `.pitboss/plans/<name>.toml`; the file
-//! stem becomes the plan's [`GrindPlan::name`] (the body never carries a
-//! `name` key — that source of truth is the path on disk). When no plan file
-//! is selected, [`default_plan_from_dir`] synthesizes one that rotates through
-//! every discovered prompt with no overrides.
+//! A grind rotation pins which prompts participate, applies per-rotation
+//! overrides on top of frontmatter defaults, and carries the hooks and
+//! budgets the runner enforces. Rotation files live at
+//! `.pitboss/grind/rotations/<name>.toml`; the file stem becomes the
+//! rotation's [`GrindPlan::name`] (the body never carries a `name` key — that
+//! source of truth is the path on disk). When no rotation is selected,
+//! [`default_plan_from_dir`] synthesizes one that rotates through every
+//! discovered prompt with no overrides.
 //!
 //! Phase 04 only loads and validates plans. Later phases drive execution.
 

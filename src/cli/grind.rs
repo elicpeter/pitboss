@@ -1,11 +1,11 @@
 //! `pitboss grind` — sequential rotating prompt runner.
 //!
 //! This is the user-facing front-end on top of [`crate::grind::GrindRunner`]:
-//! it loads `pitboss.toml`, discovers prompts from the project / global /
-//! `--prompts-dir` precedence chain, picks (or synthesizes) a plan, opens a
-//! per-run directory under `.pitboss/grind/<run-id>/`, creates and checks out
-//! the run branch (`pitboss/grind/<run-id>`), wires up Ctrl-C handling, and
-//! drives the runner to completion.
+//! it loads `config.toml`, discovers prompts from the project / global /
+//! `--prompts-dir` precedence chain, picks (or synthesizes) a rotation, opens
+//! a per-run directory under `.pitboss/grind/runs/<run-id>/`, creates and
+//! checks out the run branch (`pitboss/grind/<run-id>`), wires up Ctrl-C
+//! handling, and drives the runner to completion.
 //!
 //! Phase 07 shipped the sequential MVP. Phase 08 adds the run-wide budgets
 //! (`--max-iterations`, `--until`, `--max-cost`, `--max-tokens`) and the
@@ -26,27 +26,30 @@ use crate::agent::{self, Agent};
 use crate::config::{self, Config};
 use crate::git::{self, Git, ShellGit};
 use crate::grind::{
-    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, reconstruct_state_from_log,
-    render_dry_run_report, resolve_budgets, resolve_target, run_branch_name,
-    sweep_stale_session_worktrees as pitboss_grind_sweep, validate_resume, DiscoveryOptions,
-    DryRunInputs, ExitCode, GrindPlan, GrindRunOutcome, GrindRunner, GrindShutdown, GrindStopReason,
-    PlanBudgets, PromptDoc, ResumeError, RunDir, RunListing, SessionRecord, SessionStatus,
+    default_plan_from_dir, discover_prompts, generate_run_id, load_plan,
+    reconstruct_state_from_log, render_dry_run_report, resolve_budgets, resolve_target,
+    run_branch_name, sweep_stale_session_worktrees as pitboss_grind_sweep, validate_resume,
+    DiscoveryOptions, DryRunInputs, ExitCode, GrindPlan, GrindRunOutcome, GrindRunner,
+    GrindShutdown, GrindStopReason, PlanBudgets, PromptDoc, ResumeError, RunDir, RunListing,
+    SessionRecord, SessionStatus,
 };
 use crate::style::{self, col};
 use crate::tui;
+use crate::util::paths;
 
 /// `pitboss grind [options]` argument surface.
 #[derive(Debug, Args)]
 #[command(after_help = GRIND_AFTER_HELP)]
 pub struct GrindArgs {
-    /// Plan name to load. Resolves to `.pitboss/plans/<plan>.toml`. Without
-    /// this flag the runner falls back to `[grind] default_plan` from
-    /// `pitboss.toml`, then to a synthesized default-rotation plan over every
-    /// discovered prompt.
+    /// Rotation name to load. Resolves to
+    /// `.pitboss/grind/rotations/<rotation>.toml`. Without this flag the
+    /// runner falls back to `[grind] default_rotation` from `config.toml`,
+    /// then to a synthesized default rotation over every discovered prompt.
     #[arg(long)]
-    pub plan: Option<String>,
+    pub rotation: Option<String>,
     /// Override the prompt discovery directory. Suppresses both project
-    /// (`./.pitboss/prompts/`) and global (`~/.pitboss/prompts/`) sources.
+    /// (`./.pitboss/grind/prompts/`) and global (`~/.pitboss/grind/prompts/`)
+    /// sources.
     #[arg(long = "prompts-dir")]
     pub prompts_dir: Option<PathBuf>,
     /// Resolve the rotation, print a deterministic dry-run report (discovered
@@ -57,7 +60,7 @@ pub struct GrindArgs {
     pub dry_run: bool,
     /// On a successful run (exit code 0), open a pull request via
     /// `gh pr create` for the per-run branch. Title is
-    /// `grind/<plan>: <run-id>`; body is the run's `sessions.md` verbatim.
+    /// `grind/<rotation>: <run-id>`; body is the run's `sessions.md` verbatim.
     /// Mirrors `pitboss play --pr`. By default a failing PR call is logged but
     /// does not change the exit code; pair with `--require-pr` to enforce.
     #[arg(long)]
@@ -70,13 +73,13 @@ pub struct GrindArgs {
     #[arg(long = "require-pr")]
     pub require_pr: bool,
     /// Stop after this many sessions have been dispatched. Overrides
-    /// `[grind.budgets] max_iterations` from `pitboss.toml` and the plan's
+    /// `[grind.budgets] max_iterations` from `config.toml` and the plan's
     /// `PlanBudgets`.
     #[arg(long = "max-iterations", value_name = "N")]
     pub max_iterations: Option<u32>,
     /// RFC 3339 wall-clock cutoff. Once `Utc::now() >= until` the runner
     /// finishes any in-flight session and exits with code 3. Overrides
-    /// `[grind.budgets] until` from `pitboss.toml` and the plan's
+    /// `[grind.budgets] until` from `config.toml` and the plan's
     /// `PlanBudgets`.
     #[arg(long = "until", value_name = "RFC3339", value_parser = parse_rfc3339)]
     pub until: Option<DateTime<Utc>>,
@@ -92,9 +95,9 @@ pub struct GrindArgs {
     /// Resume a previous grind run instead of starting a new one. Without an
     /// argument, picks the most-recent run whose persisted status is `Active`
     /// or `Aborted`. With an argument, resumes the named run id (the
-    /// directory name under `.pitboss/grind/`). Refuses to resume when the
-    /// plan or prompt set has changed in a way that would invalidate the
-    /// scheduler.
+    /// directory name under `.pitboss/grind/runs/`). Refuses to resume when
+    /// the rotation or prompt set has changed in a way that would invalidate
+    /// the scheduler.
     #[arg(long = "resume", value_name = "RUN_ID", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
     /// Render a live `ratatui` dashboard instead of the plain logger.
@@ -142,7 +145,7 @@ pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
             return Ok(ExitCode::FailedToStart);
         }
     };
-    let plan = match resolve_plan(&workspace, &config, args.plan.as_deref(), &prompts) {
+    let plan = match resolve_plan(&workspace, &config, args.rotation.as_deref(), &prompts) {
         Ok(p) => p,
         Err(e) => {
             print_failed_to_start(&format!("{e:#}"));
@@ -167,7 +170,11 @@ pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
     };
 
     if let Some(target) = args.resume.as_deref() {
-        let requested = if target.is_empty() { None } else { Some(target) };
+        let requested = if target.is_empty() {
+            None
+        } else {
+            Some(target)
+        };
         return execute_resume(workspace, config, plan, prompts, agent, &args, requested).await;
     }
 
@@ -199,7 +206,11 @@ fn run_dry_run(
     let resume_payload = match args.resume.as_deref() {
         None => None,
         Some(target) => {
-            let requested = if target.is_empty() { None } else { Some(target) };
+            let requested = if target.is_empty() {
+                None
+            } else {
+                Some(target)
+            };
             match resolve_resume_for_dry_run(workspace, plan, prompts, requested) {
                 Ok(p) => Some(p),
                 Err(e) => {
@@ -246,8 +257,7 @@ fn resolve_resume_for_dry_run(
     requested: Option<&str>,
 ) -> std::result::Result<ResumeDryRunPayload, ResumeError> {
     let listing = resolve_target(workspace, requested)?;
-    let current_prompt_names: Vec<String> =
-        plan.prompts.iter().map(|p| p.name.clone()).collect();
+    let current_prompt_names: Vec<String> = plan.prompts.iter().map(|p| p.name.clone()).collect();
     let listing = validate_resume(listing, &plan.name, &current_prompt_names)?;
 
     // Read the source-of-truth log so the preview reflects any sessions that
@@ -481,18 +491,14 @@ where
         }
     };
     let prompts_map = into_lookup(prompts);
-    let reconciled = match reconstruct_state_from_log(
-        &listing.state,
-        &log_records,
-        &plan,
-        &prompts_map,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            print_failed_to_start(&render_resume_error(&e));
-            return Ok(ExitCode::FailedToStart);
-        }
-    };
+    let reconciled =
+        match reconstruct_state_from_log(&listing.state, &log_records, &plan, &prompts_map) {
+            Ok(r) => r,
+            Err(e) => {
+                print_failed_to_start(&render_resume_error(&e));
+                return Ok(ExitCode::FailedToStart);
+            }
+        };
     if reconciled.records_replayed > 0 {
         info!(
             run_id = %listing.run_id,
@@ -689,18 +695,15 @@ fn load_prompts(
 fn resolve_plan(
     workspace: &Path,
     config: &Config,
-    cli_plan: Option<&str>,
+    cli_rotation: Option<&str>,
     prompts: &[PromptDoc],
 ) -> Result<GrindPlan> {
-    let plan_name = cli_plan.or(config.grind.default_plan.as_deref());
-    let Some(name) = plan_name else {
+    let rotation_name = cli_rotation.or(config.grind.default_rotation.as_deref());
+    let Some(name) = rotation_name else {
         return Ok(default_plan_from_dir(prompts));
     };
-    let path = workspace
-        .join(".pitboss")
-        .join("plans")
-        .join(format!("{name}.toml"));
-    load_plan(&path).with_context(|| format!("grind: loading plan {:?}", path))
+    let path = paths::grind_rotations_dir(workspace).join(format!("{name}.toml"));
+    load_plan(&path).with_context(|| format!("grind: loading rotation {:?}", path))
 }
 
 fn into_lookup(prompts: Vec<PromptDoc>) -> BTreeMap<String, PromptDoc> {
@@ -751,12 +754,7 @@ fn announce_resume(run_id: &str, branch: &str, last_session_seq: u32) {
         col(c, style::CYAN, branch),
         last_session_seq.saturating_add(1),
     );
-    info!(
-        run_id,
-        branch,
-        last_session_seq,
-        "grind: run resumed"
-    );
+    info!(run_id, branch, last_session_seq, "grind: run resumed");
 }
 
 fn announce_drain() {
@@ -823,20 +821,16 @@ pub async fn open_post_run_grind_pr<G: Git + ?Sized>(
     git: &G,
     workspace: &Path,
     run_id: &str,
-    plan_name: &str,
+    rotation_name: &str,
 ) -> Result<String> {
-    let sessions_md_path = workspace
-        .join(".pitboss")
-        .join("grind")
-        .join(run_id)
-        .join("sessions.md");
+    let sessions_md_path = paths::grind_run_dir(workspace, run_id).join("sessions.md");
     let sessions_md = fs::read_to_string(&sessions_md_path).with_context(|| {
         format!(
             "grind --pr: reading {} for PR body",
             sessions_md_path.display()
         )
     })?;
-    git::open_grind_pr(git, plan_name, run_id, &sessions_md).await
+    git::open_grind_pr(git, rotation_name, run_id, &sessions_md).await
 }
 
 fn announce_pr_opened(url: &str) {

@@ -290,9 +290,7 @@ impl GrindApp {
     /// Build a fresh dashboard from a runner. Captures the run id, branch,
     /// plan name, agent display name, started_at, and the resolved budgets;
     /// no events are folded yet.
-    pub fn from_runner<A: Agent + 'static, G: Git + 'static>(
-        runner: &GrindRunner<A, G>,
-    ) -> Self {
+    pub fn from_runner<A: Agent + 'static, G: Git + 'static>(runner: &GrindRunner<A, G>) -> Self {
         Self::new(
             runner.run_id().to_string(),
             runner.branch().to_string(),
@@ -961,7 +959,12 @@ fn stop_reason_display(reason: &GrindStopReason) -> (String, Color) {
 fn format_warning(kind: &BudgetWarningKind) -> String {
     match kind {
         BudgetWarningKind::Iterations { used, cap } => {
-            format!("sessions {}/{} ({}%)", used, cap, budget_percent(u64::from(*used), u64::from(*cap)))
+            format!(
+                "sessions {}/{} ({}%)",
+                used,
+                cap,
+                budget_percent(u64::from(*used), u64::from(*cap))
+            )
         }
         BudgetWarningKind::Tokens { used, cap } => {
             format!(
@@ -1121,7 +1124,10 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        assert!(text.starts_with("> "), "expected `> ` in-flight glyph: {text}");
+        assert!(
+            text.starts_with("> "),
+            "expected `> ` in-flight glyph: {text}"
+        );
         assert!(text.contains("0003"));
         assert!(text.contains("fp-hunter"));
         assert!(text.contains("7s"));
@@ -1257,7 +1263,10 @@ mod tests {
         app.handle_event(GrindEvent::RunFinished {
             stop_reason: GrindStopReason::Completed,
         });
-        assert!(matches!(app.stop_reason(), Some(GrindStopReason::Completed)));
+        assert!(matches!(
+            app.stop_reason(),
+            Some(GrindStopReason::Completed)
+        ));
     }
 
     #[test]
@@ -1366,9 +1375,17 @@ mod tests {
     #[test]
     fn key_handlers_quit_and_pause() {
         let mut app = fixture_app();
-        assert!(handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::empty()));
+        assert!(handle_key(
+            &mut app,
+            KeyCode::Char('q'),
+            KeyModifiers::empty()
+        ));
         let mut app = fixture_app();
-        assert!(handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::empty()));
+        assert!(handle_key(
+            &mut app,
+            KeyCode::Char('a'),
+            KeyModifiers::empty()
+        ));
         let mut app = fixture_app();
         assert!(handle_key(
             &mut app,
@@ -1392,8 +1409,10 @@ mod tests {
 
     #[test]
     fn format_warning_text_includes_each_kind() {
-        assert!(format_warning(&BudgetWarningKind::Iterations { used: 8, cap: 10 })
-            .contains("sessions 8/10"));
+        assert!(
+            format_warning(&BudgetWarningKind::Iterations { used: 8, cap: 10 })
+                .contains("sessions 8/10")
+        );
         assert!(format_warning(&BudgetWarningKind::Tokens {
             used: 80_000,
             cap: 100_000,

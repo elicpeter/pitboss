@@ -5,7 +5,7 @@
 //! ## How to install / configure `codex`
 //!
 //! Pitboss shells out to whatever `codex` binary is on `PATH` (or the path you
-//! pass via `[agent.codex] binary` in `pitboss.toml`). Install per OpenAI's
+//! pass via `[agent.codex] binary` in `config.toml`). Install per OpenAI's
 //! Codex CLI docs and authenticate (`codex login`) before running pitboss. To
 //! verify the install, `codex exec --json --model o4-mini --skip-git-repo-check -`
 //! reading `hello` from stdin works from a shell — pitboss invokes the binary
@@ -104,7 +104,7 @@ impl CodexAgent {
 
     /// Append extra argv that gets spliced in just before the `-` stdin sigil
     /// on every invocation. Mirrors `[agent.codex] extra_args` in
-    /// `pitboss.toml`.
+    /// `config.toml`.
     pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
         self.extra_args = args;
         self

@@ -9,7 +9,7 @@
 //!
 //! [`detect`] probes the workspace for a recognized project layout and returns
 //! a [`TestRunner`] preconfigured to invoke the right command. The probe is
-//! best-effort; pitboss.toml's `[tests] command = "..."` overrides detection
+//! best-effort; config.toml's `[tests] command = "..."` overrides detection
 //! entirely, in which case the configured command is used verbatim.
 //!
 //! [`TestRunner::run`] executes the runner, tees combined stdout+stderr to a
@@ -61,7 +61,7 @@ pub struct TestOutcome {
 ///
 /// Independent of `program`/`args` because callers occasionally want to log or
 /// branch on the kind without re-parsing the command line. [`TestRunnerKind::Override`]
-/// signals that the runner came from `pitboss.toml` rather than detection.
+/// signals that the runner came from `config.toml` rather than detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestRunnerKind {
     /// `cargo test` — chosen when `Cargo.toml` is present.

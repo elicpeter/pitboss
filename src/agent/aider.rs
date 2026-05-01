@@ -5,7 +5,7 @@
 //! ## How to install / configure `aider`
 //!
 //! Pitboss shells out to whatever `aider` binary is on `PATH` (or the path you
-//! pass via `[agent.aider] binary` in `pitboss.toml`). Install per Aider's
+//! pass via `[agent.aider] binary` in `config.toml`). Install per Aider's
 //! docs (`pip install aider-chat` or `pipx install aider-chat`) and configure
 //! whichever `*_API_KEY` env var matches the active model before running
 //! pitboss.
@@ -104,7 +104,7 @@ impl AiderAgent {
 
     /// Append extra argv that gets spliced in just before the `--message`
     /// flag on every invocation. Mirrors `[agent.aider] extra_args` in
-    /// `pitboss.toml`. Use this to enable `--no-auto-commits`, scope the run
+    /// `config.toml`. Use this to enable `--no-auto-commits`, scope the run
     /// to specific files (`--file path`), or pass any flag the default set
     /// doesn't cover.
     pub fn with_extra_args(mut self, args: Vec<String>) -> Self {

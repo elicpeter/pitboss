@@ -3,8 +3,9 @@
 //!
 //! These exercise the binary via `assert_cmd` against a temp workspace so the
 //! full clap-dispatch path runs. Tests that require a halted run pre-populate
-//! `.pitboss/state.json` directly rather than driving the runner — driving the
-//! runner via the CLI requires a real `claude` binary, which CI doesn't have.
+//! `.pitboss/play/state.json` directly rather than driving the runner; driving
+//! the runner via the CLI requires a real `claude` binary, which CI doesn't
+//! have.
 //!
 //! The casino-themed verbs (`play` / `rebuy` / `fold`) are the canonical
 //! names; their pre-rename aliases (`run` / `resume` / `abort`) are kept for
@@ -57,7 +58,7 @@ fn init_git_repo(dir: &Path) {
     assert!(status.success());
 }
 
-/// Write a `.pitboss/state.json` directly. Mirrors what `pitboss play` would
+/// Write a `.pitboss/play/state.json` directly. Mirrors what `pitboss play` would
 /// have persisted after a halt. The on-disk field is still called `aborted`
 /// for backwards compatibility with state files written before the rename;
 /// the user-facing verb is `fold`.
@@ -82,7 +83,7 @@ fn write_state(
         "token_usage": {"input": 0, "output": 0, "by_role": {}},
         "aborted": aborted,
     });
-    let path = dir.join(".pitboss/state.json");
+    let path = dir.join(".pitboss/play/state.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, serde_json::to_string_pretty(&state).unwrap() + "\n").unwrap();
 }
@@ -225,7 +226,7 @@ fn fold_marks_state_aborted_and_persists_flag() {
         .stdout(contains("folded run 20260429T143022Z"));
 
     // The state file's `aborted` field is still the on-disk source of truth.
-    let state_text = fs::read_to_string(dir.path().join(".pitboss/state.json")).unwrap();
+    let state_text = fs::read_to_string(dir.path().join(".pitboss/play/state.json")).unwrap();
     assert!(
         state_text.contains("\"aborted\": true"),
         "state.json after fold: {state_text}"

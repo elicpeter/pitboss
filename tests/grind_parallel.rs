@@ -24,9 +24,9 @@ use pitboss::agent::{Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason};
 use pitboss::config::Config;
 use pitboss::git::{Git, ShellGit};
 use pitboss::grind::{
-    parallel_safe_violation_summary, GrindPlan, GrindRunner, GrindShutdown, GrindStopReason,
-    Hooks, ParallelSafeViolationSite, PlanBudgets, PlanPromptRef, PromptDoc, PromptMeta,
-    PromptSource, RunDir, SessionStatus,
+    parallel_safe_violation_summary, GrindPlan, GrindRunner, GrindShutdown, GrindStopReason, Hooks,
+    ParallelSafeViolationSite, PlanBudgets, PlanPromptRef, PromptDoc, PromptMeta, PromptSource,
+    RunDir, SessionStatus,
 };
 
 /// Pre-canned per-prompt behavior for the [`MockAgent`]. Each prompt declares
@@ -177,8 +177,16 @@ impl Agent for MockAgent {
         _cancel: CancellationToken,
     ) -> Result<AgentOutcome> {
         let n = self.invocations.fetch_add(1, Ordering::SeqCst) + 1;
-        let prompt_name = req.env.get("PITBOSS_PROMPT_NAME").cloned().unwrap_or_default();
-        let seq = req.env.get("PITBOSS_SESSION_SEQ").cloned().unwrap_or_default();
+        let prompt_name = req
+            .env
+            .get("PITBOSS_PROMPT_NAME")
+            .cloned()
+            .unwrap_or_default();
+        let seq = req
+            .env
+            .get("PITBOSS_SESSION_SEQ")
+            .cloned()
+            .unwrap_or_default();
 
         let _ = self.journal.enter(&prompt_name, &seq);
 
@@ -456,8 +464,16 @@ async fn two_parallel_safe_sessions_commit_concurrently_and_both_land() {
     );
 
     let journal = Arc::new(ConcurrencyJournal::default());
-    let mut runner =
-        make_runner(dir.path(), &branch, &rid, plan, &prompts, behaviors, journal.clone()).await;
+    let mut runner = make_runner(
+        dir.path(),
+        &branch,
+        &rid,
+        plan,
+        &prompts,
+        behaviors,
+        journal.clone(),
+    )
+    .await;
 
     let outcome = runner.run(GrindShutdown::new()).await.unwrap();
 
@@ -513,8 +529,16 @@ async fn parallel_safe_violation_when_two_sessions_modify_the_same_file() {
     );
 
     let journal = Arc::new(ConcurrencyJournal::default());
-    let mut runner =
-        make_runner(dir.path(), &branch, &rid, plan, &prompts, behaviors, journal.clone()).await;
+    let mut runner = make_runner(
+        dir.path(),
+        &branch,
+        &rid,
+        plan,
+        &prompts,
+        behaviors,
+        journal.clone(),
+    )
+    .await;
 
     let outcome = runner.run(GrindShutdown::new()).await.unwrap();
 
@@ -563,7 +587,7 @@ async fn parallel_safe_violation_when_two_sessions_modify_the_same_file() {
     // The failed worktree should be quarantined under worktrees/failed/.
     let failed_dir = dir
         .path()
-        .join(".pitboss/grind")
+        .join(".pitboss/grind/runs")
         .join(&rid)
         .join("worktrees/failed");
     assert!(
@@ -608,8 +632,16 @@ async fn sequential_prompts_in_same_plan_serialize_one_at_a_time() {
     }
 
     let journal = Arc::new(ConcurrencyJournal::default());
-    let mut runner =
-        make_runner(dir.path(), &branch, &rid, plan, &prompts, behaviors, journal.clone()).await;
+    let mut runner = make_runner(
+        dir.path(),
+        &branch,
+        &rid,
+        plan,
+        &prompts,
+        behaviors,
+        journal.clone(),
+    )
+    .await;
 
     let outcome = runner.run(GrindShutdown::new()).await.unwrap();
 
@@ -665,8 +697,16 @@ async fn parallel_wall_clock_is_meaningfully_less_than_sum_of_session_times() {
     );
 
     let journal = Arc::new(ConcurrencyJournal::default());
-    let mut runner =
-        make_runner(dir.path(), &branch, &rid, plan, &prompts, behaviors, journal.clone()).await;
+    let mut runner = make_runner(
+        dir.path(),
+        &branch,
+        &rid,
+        plan,
+        &prompts,
+        behaviors,
+        journal.clone(),
+    )
+    .await;
 
     let start = Instant::now();
     let outcome = runner.run(GrindShutdown::new()).await.unwrap();
@@ -748,8 +788,16 @@ async fn non_parallel_safe_prompt_locks_every_permit_in_a_mixed_plan() {
     );
 
     let journal = Arc::new(ConcurrencyJournal::default());
-    let mut runner =
-        make_runner(dir.path(), &branch, &rid, plan, &prompts, behaviors, journal.clone()).await;
+    let mut runner = make_runner(
+        dir.path(),
+        &branch,
+        &rid,
+        plan,
+        &prompts,
+        behaviors,
+        journal.clone(),
+    )
+    .await;
 
     let outcome = runner.run(GrindShutdown::new()).await.unwrap();
 

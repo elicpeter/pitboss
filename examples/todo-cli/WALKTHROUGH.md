@@ -10,15 +10,15 @@ git init
 pitboss init
 ```
 
-`pitboss init` writes `plan.md`, `deferred.md`, `pitboss.toml`, the `.pitboss/` directory, and updates `.gitignore`. Re-running `init` is a no-op.
+`pitboss init` populates the `.pitboss/` directory with `config.toml`, a `play/` subdirectory (`plan.md`, `deferred.md`, `state.json`, `snapshots/`, `logs/`) for `pitboss play`, and a `grind/` subdirectory (`prompts/`, `rotations/`, `runs/`) for `pitboss grind`. It also appends `.pitboss/` to `.gitignore`. Re-running `init` is a no-op.
 
 ## 2. Drop in the example plan
 
-Replace the seed `plan.md` and `pitboss.toml` with this example's:
+Replace the seed `plan.md` and `config.toml` with this example's:
 
 ```sh
-cp ../pitboss/examples/todo-cli/plan.md plan.md
-cp ../pitboss/examples/todo-cli/pitboss.toml pitboss.toml
+cp ../pitboss/examples/todo-cli/plan.md     .pitboss/play/plan.md
+cp ../pitboss/examples/todo-cli/config.toml .pitboss/config.toml
 ```
 
 (Adjust the paths to wherever you cloned pitboss.)
@@ -31,8 +31,8 @@ pitboss play --dry-run
 
 What this exercises with no token spend:
 
-- Parses `plan.md` and confirms `current_phase: "01"` resolves.
-- Parses `pitboss.toml`.
+- Parses `.pitboss/play/plan.md` and confirms `current_phase: "01"` resolves.
+- Parses `.pitboss/config.toml`.
 - Creates the per-run branch (`pitboss/run-<utc>`).
 - Walks each phase, dispatches the no-op agent, attempts a (no-op) commit,
   emits the same `Event` stream the real run will.
@@ -59,16 +59,16 @@ If a phase halts, pitboss prints a clear reason and exits non-zero. Run `pitboss
 ## 5. Inspect the result
 
 ```sh
-pitboss status              # phase + token + cost summary
-git log --oneline           # one commit per phase, all on the per-run branch
-cat deferred.md             # anything the auditor marked as follow-up work
-ls .pitboss/logs/           # per-attempt agent + test logs for post-mortem
+pitboss status                       # phase + token + cost summary
+git log --oneline                    # one commit per phase, all on the per-run branch
+cat .pitboss/play/deferred.md        # anything the auditor marked as follow-up work
+ls .pitboss/play/logs/               # per-attempt agent + test logs for post-mortem
 ```
 
 ## 6. Open a PR (optional)
 
 ```sh
-pitboss play --pr           # or set git.create_pr = true in pitboss.toml
+pitboss play --pr           # or set git.create_pr = true in .pitboss/config.toml
 ```
 
 Pitboss shells out to `gh pr create` with a body listing the completed phases plus any unfinished deferred items.
@@ -80,7 +80,7 @@ If you want to throw the run away:
 ```sh
 pitboss fold --checkout-original    # back to the branch you were on at run start
 git branch -D pitboss/run-<utc>     # delete the per-run branch
-rm .pitboss/state.json              # wipe the state breadcrumb
+rm .pitboss/play/state.json         # wipe the state breadcrumb
 ```
 
-`plan.md` and `deferred.md` are preserved. Pitboss never deletes them.
+`.pitboss/play/plan.md` and `.pitboss/play/deferred.md` are preserved. Pitboss never deletes them.

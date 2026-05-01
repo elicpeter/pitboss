@@ -1,14 +1,14 @@
-//! `pitboss.toml` schema and loader.
+//! `.pitboss/config.toml` schema and loader.
 //!
-//! `Config` is the typed view of the project's `pitboss.toml`. Every field has
-//! a sensible default, so a missing file or missing section round-trips to the
-//! same shape as a fully populated one. Unknown keys are logged via
-//! [`tracing::warn`] and otherwise ignored, so a forward-compatible config
-//! written by a newer pitboss can still be loaded by an older binary.
+//! `Config` is the typed view of the project's `.pitboss/config.toml`. Every
+//! field has a sensible default, so a missing file or missing section
+//! round-trips to the same shape as a fully populated one. Unknown keys are
+//! logged via [`tracing::warn`] and otherwise ignored, so a forward-compatible
+//! config written by a newer pitboss can still be loaded by an older binary.
 //!
-//! [`load`] reads `<workspace>/pitboss.toml`, returning [`Config::default()`]
-//! when the file is missing. [`parse`] is the same logic against an in-memory
-//! string, used by both [`load`] and the unit tests.
+//! [`load`] reads `<workspace>/.pitboss/config.toml`, returning
+//! [`Config::default()`] when the file is missing. [`parse`] is the same logic
+//! against an in-memory string, used by both [`load`] and the unit tests.
 //!
 //! Type errors (wrong-type values, malformed TOML) surface as anyhow errors
 //! with file context. The runner halts on these rather than silently falling
@@ -24,10 +24,12 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::grind::plan::{Hooks, PlanBudgets};
+use crate::util::paths;
 
-/// Path of the workspace's configuration file (`<workspace>/pitboss.toml`).
+/// Path of the workspace's configuration file
+/// (`<workspace>/.pitboss/config.toml`).
 pub fn config_path(workspace: impl AsRef<Path>) -> PathBuf {
-    workspace.as_ref().join("pitboss.toml")
+    paths::config_path(workspace)
 }
 
 /// Fully resolved pitboss configuration. Every section has a [`Default`] so
@@ -70,7 +72,7 @@ pub struct Config {
 /// the active agent (e.g., `claude` CLI) accepts.
 ///
 /// Every role defaults to `claude-opus-4-7`. Users wanting a cheaper
-/// implementer/fixer split can override per role in `pitboss.toml`.
+/// implementer/fixer split can override per role in `.pitboss/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelRoles {
@@ -176,7 +178,7 @@ impl Default for GitConfig {
 /// [`ModelRoles`]. Roles whose model is missing from `pricing` contribute zero
 /// USD (and a `tracing::warn` is emitted on the first dispatch); the `tokens`
 /// budget still applies. The default pricing table covers the Claude models
-/// pitboss ships defaults for; `pitboss.toml` may override or extend it.
+/// pitboss ships defaults for; `.pitboss/config.toml` may override or extend it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Budgets {
@@ -325,23 +327,24 @@ pub enum CavemanIntensity {
 }
 
 /// `[grind]` section — defaults that cover a `pitboss grind` run when no
-/// plan file overrides them.
+/// rotation file overrides them.
 ///
 /// `prompts_dir` corresponds to the `--prompts-dir` CLI flag's persistent
 /// counterpart and defaults to `None` (the standard project + global
-/// discovery rule lands in Phase 02). `default_plan` is the plan name to
-/// load when the user runs `pitboss grind` with no `--plan`. The remaining
-/// fields are the run-wide caps and inherited hook / budget tables that fall
-/// through to a plan that doesn't override them.
+/// discovery rule lands in Phase 02). `default_rotation` is the rotation
+/// name to load when the user runs `pitboss grind` with no `--rotation`. The
+/// remaining fields are the run-wide caps and inherited hook / budget tables
+/// that fall through to a rotation that doesn't override them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GrindConfig {
     /// Optional override for where to discover grind prompts. `None` keeps
     /// the precedence chain (project, then global) from Phase 02.
     pub prompts_dir: Option<PathBuf>,
-    /// Plan name to load when `pitboss grind` is invoked without `--plan`.
-    /// `None` means "synthesize the default rotation from discovered prompts".
-    pub default_plan: Option<String>,
+    /// Rotation name to load when `pitboss grind` is invoked without
+    /// `--rotation`. `None` means "synthesize the default rotation from
+    /// discovered prompts".
+    pub default_rotation: Option<String>,
     /// Cap on concurrently-running sessions. Must be `>= 1`. Defaults to `1`
     /// (sequential).
     pub max_parallel: u32,
@@ -375,7 +378,7 @@ impl Default for GrindConfig {
     fn default() -> Self {
         Self {
             prompts_dir: None,
-            default_plan: None,
+            default_rotation: None,
             max_parallel: 1,
             consecutive_failure_limit: 3,
             hook_timeout_secs: 60,
@@ -429,11 +432,11 @@ pub struct BackendOverrides {
     pub permission_mode: Option<String>,
 }
 
-/// Read the workspace's `pitboss.toml`.
+/// Read the workspace's `.pitboss/config.toml`.
 ///
-/// A missing file returns [`Config::default()`] — pitboss is usable without
-/// any config — but a present-but-malformed file is an error. Unknown keys
-/// emit a [`tracing::warn`] and are otherwise ignored.
+/// A missing file returns [`Config::default()`] (pitboss is usable without any
+/// config), but a present-but-malformed file is an error. Unknown keys emit a
+/// [`tracing::warn`] and are otherwise ignored.
 pub fn load(workspace: impl AsRef<Path>) -> Result<Config> {
     let path = config_path(workspace.as_ref());
     let text = match fs::read_to_string(&path) {
@@ -446,19 +449,19 @@ pub fn load(workspace: impl AsRef<Path>) -> Result<Config> {
     parse(&text).with_context(|| format!("config::load: parsing {:?}", path))
 }
 
-/// Parse a `pitboss.toml` body. Empty / whitespace-only input yields
+/// Parse a `config.toml` body. Empty / whitespace-only input yields
 /// [`Config::default()`]. Unknown keys are logged at warn level.
 pub fn parse(text: &str) -> Result<Config> {
     if text.trim().is_empty() {
         return Ok(Config::default());
     }
-    let value: toml::Value = toml::from_str(text).context("pitboss.toml is not valid TOML")?;
+    let value: toml::Value = toml::from_str(text).context("config.toml is not valid TOML")?;
     for unknown in find_unknown_keys(&value) {
-        warn!(key = %unknown, "pitboss.toml: unknown key {:?} (ignored)", unknown);
+        warn!(key = %unknown, "config.toml: unknown key {:?} (ignored)", unknown);
     }
     let cfg: Config = value
         .try_into()
-        .context("pitboss.toml does not match the expected schema")?;
+        .context("config.toml does not match the expected schema")?;
     validate(&cfg)?;
     Ok(cfg)
 }
@@ -467,18 +470,18 @@ pub fn parse(text: &str) -> Result<Config> {
 /// every field has its concrete type.
 fn validate(cfg: &Config) -> Result<()> {
     if cfg.grind.max_parallel == 0 {
-        anyhow::bail!("pitboss.toml: [grind] max_parallel must be >= 1");
+        anyhow::bail!("config.toml: [grind] max_parallel must be >= 1");
     }
     if cfg.grind.consecutive_failure_limit == 0 {
-        anyhow::bail!("pitboss.toml: [grind] consecutive_failure_limit must be >= 1");
+        anyhow::bail!("config.toml: [grind] consecutive_failure_limit must be >= 1");
     }
     if cfg.grind.hook_timeout_secs == 0 {
-        anyhow::bail!("pitboss.toml: [grind] hook_timeout_secs must be >= 1");
+        anyhow::bail!("config.toml: [grind] hook_timeout_secs must be >= 1");
     }
     Ok(())
 }
 
-/// Walk a parsed `pitboss.toml` value and return any keys not in the schema.
+/// Walk a parsed `config.toml` value and return any keys not in the schema.
 /// Returned in `section.key` form for nested keys, bare `section` for unknown
 /// top-level keys. Order follows the document.
 fn find_unknown_keys(value: &toml::Value) -> Vec<String> {
@@ -507,11 +510,11 @@ fn find_unknown_keys(value: &toml::Value) -> Vec<String> {
             // `grind.budgets` and `grind.hooks` are sub-tables. The walker
             // only descends one level so unknown keys *inside* them are not
             // flagged here — same tradeoff as `[agent.codex]`. Fields like
-            // `prompts_dir` and `default_plan` may themselves be sub-tables
-            // in future, so this is the right level to check.
+            // `prompts_dir` and `default_rotation` may themselves be
+            // sub-tables in future, so this is the right level to check.
             "grind" => &[
                 "prompts_dir",
-                "default_plan",
+                "default_rotation",
                 "max_parallel",
                 "consecutive_failure_limit",
                 "hook_timeout_secs",
@@ -577,7 +580,7 @@ mod tests {
         assert_eq!(cfg.grind.hook_timeout_secs, 60);
         assert_eq!(cfg.grind.transcript_retention, TranscriptRetention::KeepAll);
         assert!(cfg.grind.prompts_dir.is_none());
-        assert!(cfg.grind.default_plan.is_none());
+        assert!(cfg.grind.default_rotation.is_none());
     }
 
     #[test]
@@ -936,11 +939,9 @@ command = \"cargo test\"
     #[test]
     fn load_reads_file_from_workspace() {
         let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("pitboss.toml"),
-            "[git]\nbranch_prefix = \"loaded/\"\n",
-        )
-        .unwrap();
+        let cfg_path = config_path(dir.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, "[git]\nbranch_prefix = \"loaded/\"\n").unwrap();
         let cfg = load(dir.path()).unwrap();
         assert_eq!(cfg.git.branch_prefix, "loaded/");
     }
@@ -948,15 +949,17 @@ command = \"cargo test\"
     #[test]
     fn load_surfaces_parse_errors_with_path_context() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join("pitboss.toml"), "[broken").unwrap();
+        let cfg_path = config_path(dir.path());
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+        std::fs::write(&cfg_path, "[broken").unwrap();
         let err = load(dir.path()).unwrap_err();
         let msg = format!("{:#}", err);
-        assert!(msg.contains("pitboss.toml"), "msg: {msg}");
+        assert!(msg.contains("config.toml"), "msg: {msg}");
     }
 
     #[test]
     fn init_template_round_trips_through_loader() {
-        // The seed `pitboss.toml` written by `pitboss init` must parse cleanly
+        // The seed `config.toml` written by `pitboss init` must parse cleanly
         // and produce defaults equivalent to `Config::default()`. If the two
         // ever drift this test catches it.
         let dir = tempdir().unwrap();
@@ -975,7 +978,7 @@ mod grind {
 
     #[test]
     fn missing_section_yields_default() {
-        // A `pitboss.toml` with no `[grind]` block must round-trip to
+        // A `config.toml` with no `[grind]` block must round-trip to
         // `GrindConfig::default()` so existing workspaces are untouched.
         let cfg = parse("[git]\nbranch_prefix = \"x/\"\n").unwrap();
         assert_eq!(cfg.grind, GrindConfig::default());
@@ -986,7 +989,7 @@ mod grind {
         let text = r#"
 [grind]
 prompts_dir = "/var/pitboss/prompts"
-default_plan = "nightly"
+default_rotation = "nightly"
 max_parallel = 4
 consecutive_failure_limit = 7
 hook_timeout_secs = 90
@@ -1008,7 +1011,7 @@ on_failure = "echo failed"
             cfg.grind.prompts_dir,
             Some(PathBuf::from("/var/pitboss/prompts"))
         );
-        assert_eq!(cfg.grind.default_plan.as_deref(), Some("nightly"));
+        assert_eq!(cfg.grind.default_rotation.as_deref(), Some("nightly"));
         assert_eq!(cfg.grind.max_parallel, 4);
         assert_eq!(cfg.grind.consecutive_failure_limit, 7);
         assert_eq!(cfg.grind.hook_timeout_secs, 90);

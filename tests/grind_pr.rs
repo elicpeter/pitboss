@@ -50,8 +50,16 @@ impl Agent for MockAgent {
         _cancel: CancellationToken,
     ) -> Result<AgentOutcome> {
         let n = self.invocations.fetch_add(1, Ordering::SeqCst) + 1;
-        let prompt_name = req.env.get("PITBOSS_PROMPT_NAME").cloned().unwrap_or_default();
-        let seq = req.env.get("PITBOSS_SESSION_SEQ").cloned().unwrap_or_default();
+        let prompt_name = req
+            .env
+            .get("PITBOSS_PROMPT_NAME")
+            .cloned()
+            .unwrap_or_default();
+        let seq = req
+            .env
+            .get("PITBOSS_SESSION_SEQ")
+            .cloned()
+            .unwrap_or_default();
 
         // Land a real edit so the session produces a commit on the run branch.
         let marker = req
@@ -210,8 +218,7 @@ async fn pr_helper_invokes_mock_git_with_grind_title_and_sessions_md_body() {
     // Sanity: the grind run wrote a sessions.md the helper will inline.
     let sessions_md_path = dir
         .path()
-        .join(".pitboss")
-        .join("grind")
+        .join(".pitboss/grind/runs")
         .join(RUN_ID)
         .join("sessions.md");
     let sessions_md = fs::read_to_string(&sessions_md_path).unwrap();

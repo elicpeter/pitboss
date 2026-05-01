@@ -5,7 +5,7 @@
 //! ## How to install / configure `gemini`
 //!
 //! Pitboss shells out to whatever `gemini` binary is on `PATH` (or the path you
-//! pass via `[agent.gemini] binary` in `pitboss.toml`). Install per Google's
+//! pass via `[agent.gemini] binary` in `config.toml`). Install per Google's
 //! Gemini CLI docs (`npm install -g @google/gemini-cli`) and configure
 //! authentication (`GEMINI_API_KEY` env var, or `gemini auth`) before running
 //! pitboss.
@@ -104,7 +104,7 @@ impl GeminiAgent {
 
     /// Append extra argv that gets spliced in just before the `--prompt` flag
     /// on every invocation. Mirrors `[agent.gemini] extra_args` in
-    /// `pitboss.toml`.
+    /// `config.toml`.
     pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
         self.extra_args = args;
         self

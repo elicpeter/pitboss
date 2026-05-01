@@ -7,7 +7,7 @@
 //! launched via `assert_cmd` against a real workspace, with the
 //! `tests/fixtures/fake-gh-success.sh` shim wired in via PATH and
 //! `tests/fixtures/fake-claude-success.sh` wired in via
-//! `[agent.claude_code] binary` in `pitboss.toml`. That covers the
+//! `[agent.claude_code] binary` in `.pitboss/config.toml`. That covers the
 //! `if args.pr && exit == ExitCode::Success` branch in `cli::grind::execute`
 //! that the mock variant cannot reach.
 
@@ -103,7 +103,7 @@ fn grind_with_pr_invokes_fake_gh_and_succeeds() {
     // workspace, so the session resolves Ok with the "(no summary
     // provided)" fallback.
     write_prompt(
-        &work.path().join(".pitboss").join("prompts"),
+        &work.path().join(".pitboss/grind/prompts"),
         "alpha.md",
         "---\nname: alpha\ndescription: only prompt\nmax_runs: 1\n---\nalpha body\n",
     );
@@ -113,7 +113,9 @@ fn grind_with_pr_invokes_fake_gh_and_succeeds() {
         "[agent.claude_code]\nbinary = \"{}\"\n",
         claude_bin.display()
     );
-    fs::write(work.path().join("pitboss.toml"), toml).unwrap();
+    let config_path = work.path().join(".pitboss/config.toml");
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    fs::write(&config_path, toml).unwrap();
 
     let original_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{}:{}", bin.path().display(), original_path);

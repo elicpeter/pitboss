@@ -115,10 +115,10 @@ const EMPTY_DEFERRED: &str = "## Deferred items\n\n## Deferred phases\n";
 
 fn make_workspace(plan_text: &str, deferred_text: &str) -> tempfile::TempDir {
     let dir = tempdir().expect("tempdir");
-    fs::write(dir.path().join("plan.md"), plan_text).unwrap();
-    fs::write(dir.path().join("deferred.md"), deferred_text).unwrap();
-    fs::create_dir_all(dir.path().join(".pitboss/snapshots")).unwrap();
-    fs::create_dir_all(dir.path().join(".pitboss/logs")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/play/snapshots")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/play/logs")).unwrap();
+    fs::write(dir.path().join(".pitboss/play/plan.md"), plan_text).unwrap();
+    fs::write(dir.path().join(".pitboss/play/deferred.md"), deferred_text).unwrap();
     dir
 }
 

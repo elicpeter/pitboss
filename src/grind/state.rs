@@ -1,12 +1,13 @@
 //! Persisted resume state for a `pitboss grind` run.
 //!
-//! A run's `state.json` (written to `.pitboss/grind/<run-id>/state.json`)
-//! caches everything `pitboss grind --resume` needs to pick up where the
-//! original loop left off:
+//! A run's `state.json` (written to
+//! `.pitboss/grind/runs/<run-id>/state.json`) caches everything
+//! `pitboss grind --resume` needs to pick up where the original loop left
+//! off:
 //!
 //! - the scheduler position (rotation count + per-prompt run counts),
 //! - the budget tracker's cumulative spend,
-//! - the run's branch and plan name,
+//! - the run's branch and rotation name,
 //! - the prompt-name list at run start, used as a "did the prompt set change"
 //!   fingerprint, and
 //! - the run's lifecycle status ([`RunStatus`]).
@@ -24,6 +25,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::util::paths::grind_runs_dir;
 use crate::util::write_atomic;
 
 use super::budget::BudgetSnapshot;
@@ -93,8 +95,8 @@ pub struct RunState {
 impl RunState {
     /// Atomically write this state to `<run-root>/state.json`.
     pub fn write(&self, paths: &RunPaths) -> Result<()> {
-        let mut bytes = serde_json::to_vec_pretty(self)
-            .context("grind state: serializing RunState")?;
+        let mut bytes =
+            serde_json::to_vec_pretty(self).context("grind state: serializing RunState")?;
         bytes.push(b'\n');
         write_atomic(&paths.state, &bytes)?;
         Ok(())
@@ -122,7 +124,7 @@ impl RunState {
 /// exact file.
 #[derive(Debug, Clone)]
 pub struct RunListing {
-    /// Run id (directory name under `.pitboss/grind/`).
+    /// Run id (directory name under `.pitboss/grind/runs/`).
     pub run_id: String,
     /// Path to the `state.json` file.
     pub state_path: PathBuf,
@@ -130,12 +132,12 @@ pub struct RunListing {
     pub state: RunState,
 }
 
-/// Walk `<repo>/.pitboss/grind/` for runs that have a parseable `state.json`,
-/// regardless of their lifecycle status. Errors from individual run dirs are
-/// dropped so a single corrupt run doesn't hide the rest. The result is sorted
-/// by `last_updated_at` descending (most recent first).
+/// Walk `<repo>/.pitboss/grind/runs/` for runs that have a parseable
+/// `state.json`, regardless of their lifecycle status. Errors from individual
+/// run dirs are dropped so a single corrupt run doesn't hide the rest. The
+/// result is sorted by `last_updated_at` descending (most recent first).
 pub fn list_runs(repo_root: &Path) -> Vec<RunListing> {
-    let grind_root = repo_root.join(".pitboss").join("grind");
+    let grind_root = grind_runs_dir(repo_root);
     let entries = match fs::read_dir(&grind_root) {
         Ok(it) => it,
         Err(_) => return Vec::new(),
@@ -164,10 +166,10 @@ pub fn list_runs(repo_root: &Path) -> Vec<RunListing> {
     out
 }
 
-/// Find the most-recent run under `<repo>/.pitboss/grind/` whose persisted
-/// status is [`RunStatus::Active`] or [`RunStatus::Aborted`]. Returns `None`
-/// when no resumable run exists. The default target for `--resume` with no
-/// argument.
+/// Find the most-recent run under `<repo>/.pitboss/grind/runs/` whose
+/// persisted status is [`RunStatus::Active`] or [`RunStatus::Aborted`].
+/// Returns `None` when no resumable run exists. The default target for
+/// `--resume` with no argument.
 pub fn most_recent_resumable(repo_root: &Path) -> Option<RunListing> {
     list_runs(repo_root)
         .into_iter()
@@ -178,10 +180,10 @@ pub fn most_recent_resumable(repo_root: &Path) -> Option<RunListing> {
 /// CLI diagnostic; none of them leave the run in a partially resumed state.
 #[derive(Debug, thiserror::Error)]
 pub enum ResumeError {
-    /// No resumable run exists under `<repo>/.pitboss/grind/`.
+    /// No resumable run exists under `<repo>/.pitboss/grind/runs/`.
     #[error("no resumable grind run found under {dir}")]
     NoResumableRun {
-        /// `.pitboss/grind/` path searched.
+        /// `.pitboss/grind/runs/` path searched.
         dir: PathBuf,
     },
     /// The named run does not exist on disk.
@@ -189,7 +191,7 @@ pub enum ResumeError {
     RunNotFound {
         /// Requested run id.
         run_id: String,
-        /// The expected `<repo>/.pitboss/grind/<run-id>/` path.
+        /// The expected `<repo>/.pitboss/grind/runs/<run-id>/` path.
         dir: PathBuf,
     },
     /// The run's `state.json` is missing or malformed.
@@ -211,7 +213,7 @@ pub enum ResumeError {
         /// Persisted status that disqualified the run.
         status: RunStatus,
     },
-    /// The plan name in `pitboss.toml`/CLI no longer matches the run's
+    /// The plan name in `config.toml`/CLI no longer matches the run's
     /// recorded plan.
     #[error(
         "grind run {run_id:?}: plan name changed (was {original:?}, now {current:?}); start a new run with `pitboss grind`"
@@ -285,7 +287,7 @@ pub fn resolve_target(
     repo_root: &Path,
     requested: Option<&str>,
 ) -> Result<RunListing, ResumeError> {
-    let grind_root = repo_root.join(".pitboss").join("grind");
+    let grind_root = grind_runs_dir(repo_root);
     match requested {
         Some(id) => {
             let dir = grind_root.join(id);
@@ -296,12 +298,11 @@ pub fn resolve_target(
                 });
             }
             let state_path = dir.join(STATE_FILENAME);
-            let state = RunState::read_path(&state_path).map_err(|e| {
-                ResumeError::StateUnreadable {
+            let state =
+                RunState::read_path(&state_path).map_err(|e| ResumeError::StateUnreadable {
                     run_id: id.to_string(),
                     source: e,
-                }
-            })?;
+                })?;
             Ok(RunListing {
                 run_id: id.to_string(),
                 state_path,
@@ -416,11 +417,8 @@ pub fn reconstruct_state_from_log(
         .collect();
     missing.sort_by_key(|r| r.seq);
 
-    let mut sched = Scheduler::with_state(
-        plan.clone(),
-        prompts.clone(),
-        state.scheduler_state.clone(),
-    );
+    let mut sched =
+        Scheduler::with_state(plan.clone(), prompts.clone(), state.scheduler_state.clone());
     let mut budget = state.budget_consumed;
 
     for rec in &missing {
@@ -571,7 +569,11 @@ mod tests {
     fn most_recent_resumable_skips_terminal_runs() {
         let repo = tempdir().unwrap();
         for (run_id, ts, status) in [
-            ("rid-completed", "2026-04-30T18:00:00Z", RunStatus::Completed),
+            (
+                "rid-completed",
+                "2026-04-30T18:00:00Z",
+                RunStatus::Completed,
+            ),
             ("rid-aborted", "2026-04-30T17:00:00Z", RunStatus::Aborted),
             ("rid-active", "2026-04-30T16:00:00Z", RunStatus::Active),
         ] {
@@ -616,12 +618,8 @@ mod tests {
         let s = fixture_state(run_id, RunStatus::Completed);
         s.write(&paths).unwrap();
         let listing = resolve_target(repo.path(), Some(run_id)).unwrap();
-        let err = validate_resume(
-            listing,
-            "default",
-            &["alpha".into(), "bravo".into()],
-        )
-        .unwrap_err();
+        let err =
+            validate_resume(listing, "default", &["alpha".into(), "bravo".into()]).unwrap_err();
         assert!(matches!(err, ResumeError::NotResumable { .. }));
     }
 
@@ -677,12 +675,7 @@ mod tests {
         let s = fixture_state(run_id, RunStatus::Active);
         s.write(&paths).unwrap();
         let listing = resolve_target(repo.path(), Some(run_id)).unwrap();
-        let ok = validate_resume(
-            listing,
-            "default",
-            &["bravo".into(), "alpha".into()],
-        )
-        .unwrap();
+        let ok = validate_resume(listing, "default", &["bravo".into(), "alpha".into()]).unwrap();
         assert_eq!(ok.run_id, run_id);
     }
 
@@ -695,12 +688,8 @@ mod tests {
         let s = fixture_state(run_id, RunStatus::Active);
         s.write(&paths).unwrap();
         let listing = resolve_target(repo.path(), Some(run_id)).unwrap();
-        let err = validate_resume(
-            listing,
-            "fp-cleanup",
-            &["alpha".into(), "bravo".into()],
-        )
-        .unwrap_err();
+        let err =
+            validate_resume(listing, "fp-cleanup", &["alpha".into(), "bravo".into()]).unwrap_err();
         assert!(matches!(err, ResumeError::PlanRenamed { .. }));
     }
 
@@ -715,7 +704,7 @@ mod tests {
     #[test]
     fn missing_state_json_is_skipped_in_listings() {
         let repo = tempdir().unwrap();
-        let dir = repo.path().join(".pitboss/grind/no-state");
+        let dir = repo.path().join(".pitboss/grind/runs/no-state");
         fs::create_dir_all(&dir).unwrap();
         assert!(list_runs(repo.path()).is_empty());
     }
@@ -780,8 +769,10 @@ mod tests {
         use crate::grind::plan::default_plan_from_dir;
         let prompts = vec![fixture_prompt(name)];
         let plan = default_plan_from_dir(&prompts);
-        let lookup: BTreeMap<String, PromptDoc> =
-            prompts.into_iter().map(|p| (p.meta.name.clone(), p)).collect();
+        let lookup: BTreeMap<String, PromptDoc> = prompts
+            .into_iter()
+            .map(|p| (p.meta.name.clone(), p))
+            .collect();
         (plan, lookup)
     }
 
@@ -848,7 +839,10 @@ mod tests {
         assert_eq!(recon.last_session_seq, 3);
         assert_eq!(recon.scheduler_state.rotation, 3);
         assert_eq!(recon.scheduler_state.runs_per_prompt.get("alpha"), Some(&3));
-        assert_eq!(recon.budget_consumed.iterations, original_budget.iterations + 1);
+        assert_eq!(
+            recon.budget_consumed.iterations,
+            original_budget.iterations + 1
+        );
         assert_eq!(
             recon.budget_consumed.tokens_input,
             original_budget.tokens_input + 200

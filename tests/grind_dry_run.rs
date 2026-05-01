@@ -5,7 +5,7 @@
 //!
 //! - exit `0`
 //! - print the deterministic header (`=== pitboss grind --dry-run ===`)
-//! - never create a `.pitboss/grind/<run-id>/` directory
+//! - never create a `.pitboss/grind/runs/<run-id>/` directory
 //! - never invoke git (proven by the test workspace not being a git repo —
 //!   if dry-run accidentally tried to `git init` / `git checkout` the
 //!   subprocess would error out)
@@ -40,7 +40,7 @@ fn write_prompt(dir: &Path, file: &str, body: &str) {
 }
 
 fn seed_three_prompts(workspace: &Path) {
-    let dir = workspace.join(".pitboss").join("prompts");
+    let dir = workspace.join(".pitboss/grind/prompts");
     write_prompt(
         &dir,
         "alpha.md",
@@ -91,11 +91,11 @@ fn dry_run_creates_no_run_directory_and_no_branch() {
         .assert()
         .success();
 
-    let grind_root = work.path().join(".pitboss").join("grind");
+    let grind_runs_root = work.path().join(".pitboss/grind/runs");
     assert!(
-        !grind_root.exists() || fs::read_dir(&grind_root).unwrap().next().is_none(),
+        !grind_runs_root.exists() || fs::read_dir(&grind_runs_root).unwrap().next().is_none(),
         "no per-run directory should be created: {:?}",
-        grind_root
+        grind_runs_root
     );
 
     // Sanity: this is not a git repo, so the path that would skip the
@@ -189,7 +189,11 @@ fn dry_run_with_resume_seeds_preview_from_persisted_state() {
         run_id: run_id.to_string(),
         branch: format!("pitboss/grind/{run_id}"),
         plan_name: "default".to_string(),
-        prompt_names: vec!["alpha".to_string(), "bravo".to_string(), "charlie".to_string()],
+        prompt_names: vec![
+            "alpha".to_string(),
+            "bravo".to_string(),
+            "charlie".to_string(),
+        ],
         scheduler_state: pitboss::grind::SchedulerState {
             rotation: 3,
             runs_per_prompt: runs,

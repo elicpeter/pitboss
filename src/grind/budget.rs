@@ -8,7 +8,7 @@
 //! Budgets are resolved from three layered sources, with later sources
 //! overriding earlier ones:
 //!
-//! 1. `[grind.budgets]` in `pitboss.toml` — workspace-wide defaults.
+//! 1. `[grind.budgets]` in `config.toml` — workspace-wide defaults.
 //! 2. The selected plan's `PlanBudgets` block — plan-specific overrides.
 //! 3. CLI flags (`--max-iterations`, `--until`, `--max-cost`, `--max-tokens`).
 //!
@@ -326,7 +326,7 @@ impl BudgetTracker {
 }
 
 /// Resolve the budgets a run should enforce. Order of precedence (later wins):
-/// 1. `[grind.budgets]` from `pitboss.toml`.
+/// 1. `[grind.budgets]` from `config.toml`.
 /// 2. The plan's `PlanBudgets`.
 /// 3. CLI flag overrides.
 pub fn resolve_budgets(

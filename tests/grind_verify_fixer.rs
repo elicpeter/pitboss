@@ -150,7 +150,10 @@ fn init_git_repo(dir: &Path) {
         .status()
         .expect("git init");
     assert!(status.success());
-    for (k, v) in [("user.name", "pitboss-test"), ("user.email", "pitboss@test")] {
+    for (k, v) in [
+        ("user.name", "pitboss-test"),
+        ("user.email", "pitboss@test"),
+    ] {
         Command::new("git")
             .args(["-C"])
             .arg(dir)
@@ -193,8 +196,10 @@ async fn verify_failure_dispatches_fixer_and_recovers_when_tests_pass() {
     let script = dir.path().join("test.sh");
     write_marker_test_script(dir.path(), &script, "fixer-marker");
 
+    let cfg_path = dir.path().join(".pitboss/config.toml");
+    fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
     fs::write(
-        dir.path().join("pitboss.toml"),
+        &cfg_path,
         "[tests]\ncommand = \"./test.sh\"\n[retries]\nfixer_max_attempts = 2\n",
     )
     .unwrap();
@@ -234,10 +239,7 @@ async fn verify_failure_dispatches_fixer_and_recovers_when_tests_pass() {
     );
 
     let outcome = runner.run(GrindShutdown::new()).await.unwrap();
-    assert!(matches!(
-        outcome.stop_reason,
-        GrindStopReason::Completed
-    ));
+    assert!(matches!(outcome.stop_reason, GrindStopReason::Completed));
     assert_eq!(outcome.sessions.len(), 1);
     assert_eq!(outcome.sessions[0].status, SessionStatus::Ok);
     assert_eq!(implementer.load(Ordering::SeqCst), 1);
@@ -255,8 +257,10 @@ async fn verify_failure_exhausts_fixer_budget_and_records_error() {
     let script = dir.path().join("test.sh");
     write_marker_test_script(dir.path(), &script, "marker-never-written");
 
+    let cfg_path = dir.path().join(".pitboss/config.toml");
+    fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
     fs::write(
-        dir.path().join("pitboss.toml"),
+        &cfg_path,
         "[tests]\ncommand = \"./test.sh\"\n[retries]\nfixer_max_attempts = 2\n",
     )
     .unwrap();
@@ -313,8 +317,10 @@ async fn verify_failure_with_fixer_disabled_records_error_immediately() {
     let script = dir.path().join("test.sh");
     write_marker_test_script(dir.path(), &script, "marker-never-written");
 
+    let cfg_path = dir.path().join(".pitboss/config.toml");
+    fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
     fs::write(
-        dir.path().join("pitboss.toml"),
+        &cfg_path,
         "[tests]\ncommand = \"./test.sh\"\n[retries]\nfixer_max_attempts = 0\n",
     )
     .unwrap();

@@ -45,7 +45,7 @@ pub struct UsageView {
 
 /// Static header chip describing the active agent backend and the per-role
 /// model it dispatches with. The runner can mix models across roles when a
-/// user splits Opus implementer / Sonnet auditor in `pitboss.toml`, so the
+/// user splits Opus implementer / Sonnet auditor in `config.toml`, so the
 /// header tracks all three and renders the one belonging to the active
 /// activity. `agent_name` mirrors [`crate::agent::Agent::name`].
 #[derive(Debug, Clone)]

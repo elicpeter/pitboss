@@ -228,8 +228,7 @@ async fn kill_and_resume_continues_from_persisted_state() {
         fake_prompt("bravo"),
         fake_prompt("charlie"),
     ];
-    let (_runner, first_sessions) =
-        run_initial_until_drain(dir.path(), run_id, &prompts, 3).await;
+    let (_runner, first_sessions) = run_initial_until_drain(dir.path(), run_id, &prompts, 3).await;
     assert!(
         first_sessions.len() >= 3,
         "expected at least 3 sessions before drain, got {}",
@@ -301,10 +300,7 @@ async fn kill_and_resume_continues_from_persisted_state() {
 
     // The full sessions.jsonl now has both halves of the run.
     let combined = std::fs::read_to_string(&paths.sessions_jsonl).unwrap();
-    let lines: Vec<&str> = combined
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect();
+    let lines: Vec<&str> = combined.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(
         lines.len(),
         first_sessions.len() + outcome.sessions.len(),
@@ -325,8 +321,7 @@ async fn resume_emits_same_next_prompt_the_original_would_have() {
         fake_prompt("bravo"),
         fake_prompt("charlie"),
     ];
-    let (_runner, _first_sessions) =
-        run_initial_until_drain(dir.path(), run_id, &prompts, 4).await;
+    let (_runner, _first_sessions) = run_initial_until_drain(dir.path(), run_id, &prompts, 4).await;
 
     let paths = pitboss::grind::RunPaths::for_run(dir.path(), run_id);
     let state = RunState::read(&paths).unwrap();
@@ -334,8 +329,11 @@ async fn resume_emits_same_next_prompt_the_original_would_have() {
     // Build a "what would have been next" projection from the persisted
     // scheduler state alone, with no IO and no runner.
     let plan = default_plan_from_dir(&prompts);
-    let mut projection =
-        Scheduler::with_state(plan.clone(), lookup(&prompts), state.scheduler_state.clone());
+    let mut projection = Scheduler::with_state(
+        plan.clone(),
+        lookup(&prompts),
+        state.scheduler_state.clone(),
+    );
     let projected_next = projection
         .next()
         .expect("scheduler must have at least one more candidate")
@@ -382,7 +380,11 @@ async fn resume_emits_same_next_prompt_the_original_would_have() {
     let outcome = runner.run(shutdown).await.unwrap();
     let _ = watcher.await;
 
-    let first_dispatched = &outcome.sessions.first().expect("at least one resumed session").prompt;
+    let first_dispatched = &outcome
+        .sessions
+        .first()
+        .expect("at least one resumed session")
+        .prompt;
     assert_eq!(
         first_dispatched, &projected_next,
         "resumed runner must dispatch the same prompt the original scheduler would have"
@@ -394,7 +396,7 @@ async fn resume_emits_same_next_prompt_the_original_would_have() {
 #[tokio::test]
 async fn default_resume_picks_most_recent_resumable() {
     let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join(".pitboss/grind")).unwrap();
+    fs::create_dir_all(dir.path().join(".pitboss/grind/runs")).unwrap();
 
     // Create two run dirs by hand, with different timestamps and statuses.
     fn write_state(repo: &Path, run_id: &str, status: RunStatus, ts: &str) {
@@ -463,8 +465,7 @@ async fn resume_rejects_when_prompt_removed() {
     let dir = tempfile::tempdir().unwrap();
     let run_id = "20260430T180000Z-rsm2";
     let prompts = vec![fake_prompt("alpha"), fake_prompt("bravo")];
-    let (_runner, _first_sessions) =
-        run_initial_until_drain(dir.path(), run_id, &prompts, 2).await;
+    let (_runner, _first_sessions) = run_initial_until_drain(dir.path(), run_id, &prompts, 2).await;
 
     // Discover only one prompt now (bravo removed).
     let listing = resolve_target(dir.path(), Some(run_id)).unwrap();

@@ -84,7 +84,7 @@ pub enum Command {
         tui: bool,
         /// After the run finishes successfully, open a pull request via
         /// `gh pr create`. Equivalent to setting `git.create_pr = true` in
-        /// `pitboss.toml`; either source enables the post-run PR step.
+        /// `config.toml`; either source enables the post-run PR step.
         #[arg(long)]
         pr: bool,
         /// Swap the configured agent for the deterministic `DryRunAgent`.

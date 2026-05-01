@@ -13,7 +13,7 @@
 
 </div>
 
-Pitboss is a Rust CLI that drives a coding agent through a multi-phase implementation plan. Claude Code is the default; OpenAI's Codex CLI, Aider, and Gemini CLI are also wired in and selectable from `pitboss.toml` (see [Agent backends](#agent-backends)). It runs your test suite after every phase, retries failures with a fixer agent, audits the diff, lands a commit, then moves on. Bounded retries everywhere. Token and dollar budgets. A live TUI if you want to watch.
+Pitboss is a Rust CLI that drives a coding agent through a multi-phase implementation plan. Claude Code is the default; OpenAI's Codex CLI, Aider, and Gemini CLI are also wired in and selectable from `.pitboss/config.toml` (see [Agent backends](#agent-backends)). It runs your test suite after every phase, retries failures with a fixer agent, audits the diff, lands a commit, then moves on. Bounded retries everywhere. Token and dollar budgets. A live TUI if you want to watch.
 
 <div align="center">
   <img src="assets/pitboss-tui.png" alt="pitboss play --tui dashboard" width="900"/>
@@ -42,11 +42,14 @@ Pitboss is a Rust CLI that drives a coding agent through a multi-phase implement
 
 Three files do the work.
 
+All three live under `.pitboss/`, which is gitignored. Pitboss never writes to your tracked files.
+
 | File | Owner | Contents |
 |------|-------|----------|
-| `plan.md` | you | The phases. Read-only to agents. |
-| `deferred.md` | the agent | Anything the agent couldn't finish in a phase. Swept between phases. |
-| `.pitboss/state.json` | pitboss | Run id, branch, attempts, token usage. |
+| `.pitboss/play/plan.md` | you | The phases. Read-only to agents. |
+| `.pitboss/play/deferred.md` | the agent | Anything the agent couldn't finish in a phase. Swept between phases. |
+| `.pitboss/play/state.json` | pitboss | Run id, branch, attempts, token usage. |
+| `.pitboss/config.toml` | you | Agent backend, models, budgets, retries. |
 
 Each phase becomes its own commit on a per-run branch, optionally rolled into a pull request when the run finishes.
 
@@ -95,7 +98,7 @@ cargo install --path .
 
 To actually drive the agent you also need:
 
-- **`claude`**, the Claude Code CLI from Anthropic. Required for the default backend; optional if you select a different one in `pitboss.toml`.
+- **`claude`**, the Claude Code CLI from Anthropic. Required for the default backend; optional if you select a different one in `.pitboss/config.toml`.
 - **`git`**, any reasonably recent version.
 - **`gh`** (optional), only if you want `--pr` to open pull requests.
 
@@ -110,8 +113,8 @@ If you plan to swap backends, install whichever CLI you intend to use instead of
 ```sh
 mkdir my-project && cd my-project
 git init
-pitboss init                # scaffold plan.md, deferred.md, pitboss.toml, .pitboss/
-$EDITOR plan.md             # describe the work, phase by phase
+pitboss init                # scaffold .pitboss/{config.toml, play/{plan.md, deferred.md, ...}}
+$EDITOR .pitboss/play/plan.md   # describe the work, phase by phase
 pitboss play --dry-run      # exercise the runner without spending tokens
 pitboss play                # let the agent loop drive the plan
 pitboss status              # check progress at any time
@@ -170,7 +173,7 @@ For each phase in `plan.md`:
 4. Re-parse `deferred.md`. On parse failure, restore the snapshot and halt.
 5. Run the project test suite. If it fails, dispatch the **fixer** agent up to `retries.fixer_max_attempts` times.
 6. Stage the diff and dispatch the **auditor** agent (when `audit.enabled = true`). The auditor inlines small fixes and records anything larger in `deferred.md`. Tests run again post-audit.
-7. Commit the staged diff to the per-run branch as `[pitboss] phase <id>: <title>`. `plan.md`, `deferred.md`, and `.pitboss/` are excluded from the commit.
+7. Commit the staged diff to the per-run branch as `[pitboss] phase <id>: <title>`. The entire `.pitboss/` directory is gitignored, so nothing pitboss writes lands in your commits.
 8. Sweep checked-off deferred items, advance `current_phase` in `plan.md`, persist `state.json`, move on.
 
 Every retry is bounded. When a budget is exhausted the runner halts with a clear reason and `pitboss rebuy` picks up from the same phase.
@@ -184,7 +187,7 @@ Every retry is bounded. When a budget is exhausted the runner halts with a clear
 
 ## Configuration
 
-Pitboss reads `pitboss.toml` from the workspace root. Every section is optional, missing keys fall back to defaults. Unknown keys load with a warning so a config written by a newer pitboss still works.
+Pitboss reads `.pitboss/config.toml`. Every section is optional, missing keys fall back to defaults. Unknown keys load with a warning so a config written by a newer pitboss still works.
 
 ```toml
 # Per-role model selection. Strings pass verbatim to the agent (e.g.
@@ -263,7 +266,7 @@ One tradeoff worth knowing. The planner, fixer, and auditor each produce output 
 
 ## Agent backends
 
-Pitboss dispatches every implementer / fixer / auditor / planner role through a pluggable backend that wraps an external coding-agent CLI. Pick one in `pitboss.toml`:
+Pitboss dispatches every implementer / fixer / auditor / planner role through a pluggable backend that wraps an external coding-agent CLI. Pick one in `.pitboss/config.toml`:
 
 ```toml
 [agent]
@@ -361,8 +364,8 @@ Unrecognized layouts skip the test step. The runner then advances on a passing i
 
 `pitboss play --dry-run` swaps the configured agent for a deterministic no-op and skips test execution. Use it to sanity-check that:
 
-- `plan.md` parses and `current_phase` resolves to a real heading.
-- `pitboss.toml` parses cleanly with the keys you expect.
+- `.pitboss/play/plan.md` parses and `current_phase` resolves to a real heading.
+- `.pitboss/config.toml` parses cleanly with the keys you expect.
 - The per-run branch is created and checked out without touching `main`.
 - The event stream and TUI / logger render correctly.
 
@@ -376,17 +379,19 @@ After `pitboss init`:
 
 ```
 your-project/
-├── plan.md              # source of truth for the work
-├── deferred.md          # agent-writable, swept between phases
-├── pitboss.toml         # config
 ├── .gitignore           # pitboss appends `.pitboss/` if missing
-└── .pitboss/
-    ├── state.json       # runner-managed, ignored by git
-    ├── snapshots/       # pre-agent snapshots of plan.md and deferred.md
-    └── logs/            # per-phase, per-attempt agent and test logs
+└── .pitboss/            # entirely gitignored — per-user, per-session state
+    ├── config.toml      # backend, models, budgets, retries
+    ├── play/            # multi-phase runner (`pitboss play`) artifacts
+    │   ├── plan.md          # source of truth for the work
+    │   ├── deferred.md      # agent-writable, swept between phases
+    │   ├── state.json       # runner-managed
+    │   ├── snapshots/       # pre-agent snapshots of plan.md / deferred.md
+    │   └── logs/            # per-phase, per-attempt agent and test logs
+    └── grind/           # `pitboss grind` session state (one subdir per run)
 ```
 
-`init` is idempotent. Re-running it on a populated workspace skips every existing file and prints a per-file summary.
+Everything pitboss writes lives under `.pitboss/`, so a single gitignore line keeps your project tree clean. `init` is idempotent — re-running it on a populated workspace skips every existing file and prints a per-file summary.
 
 ## Troubleshooting
 
@@ -399,13 +404,13 @@ The agent wrote to `plan.md`. Pitboss restored the file from snapshot, your plan
 <details>
 <summary><code>run halted at phase NN: deferred.md is invalid: ...</code></summary>
 
-The agent wrote a malformed `deferred.md`. Pitboss restored from snapshot. The error message includes a 1-based line number. Check the agent's log under `.pitboss/logs/phase-<id>-implementer-<n>.log` to see what it tried to write.
+The agent wrote a malformed `deferred.md`. Pitboss restored from snapshot. The error message includes a 1-based line number. Check the agent's log under `.pitboss/play/logs/phase-<id>-implementer-<n>.log` to see what it tried to write.
 </details>
 
 <details>
 <summary><code>run halted at phase NN: tests failed: ...</code></summary>
 
-The implementer plus fixer dispatches together couldn't get the suite green within the configured budget. The summary includes the trailing lines of the test log; the full transcript is at `.pitboss/logs/phase-<id>-tests-<n>.log`. Either bump `retries.fixer_max_attempts`, fix the failing test by hand, or rework the phase.
+The implementer plus fixer dispatches together couldn't get the suite green within the configured budget. The summary includes the trailing lines of the test log; the full transcript is at `.pitboss/play/logs/phase-<id>-tests-<n>.log`. Either bump `retries.fixer_max_attempts`, fix the failing test by hand, or rework the phase.
 </details>
 
 <details>
@@ -415,13 +420,13 @@ The implementer plus fixer dispatches together couldn't get the suite green with
 </details>
 
 <details>
-<summary><code>run X was folded; remove .pitboss/state.json to start over</code></summary>
+<summary><code>run X was folded; remove .pitboss/play/state.json to start over</code></summary>
 
-A previous run was folded with `pitboss fold` (or its `pitboss abort` alias). Pitboss keeps the state file as a breadcrumb. Delete `.pitboss/state.json` to start fresh. Everything else (plan, deferred, branch, commits) is preserved.
+A previous run was folded with `pitboss fold` (or its `pitboss abort` alias). Pitboss keeps the state file as a breadcrumb. Delete `.pitboss/play/state.json` to start fresh. Everything else (plan, deferred, branch, commits) is preserved.
 </details>
 
 <details>
-<summary><code>no run to rebuy: .pitboss/state.json is empty</code></summary>
+<summary><code>no run to rebuy: .pitboss/play/state.json is empty</code></summary>
 
 You called `pitboss rebuy` on a workspace where no run has started. Use `pitboss play` instead.
 </details>
@@ -469,7 +474,8 @@ src/
 ├── plan/            Plan/Phase types, parser, snapshot
 ├── deferred/        DeferredDoc/items/phases, parser
 ├── state/           RunState, atomic IO
-├── config/          pitboss.toml schema and loader
+├── config/          config.toml schema and loader
+├── util/paths.rs    workspace-relative paths under `.pitboss/`
 ├── agent/           Agent trait, request/outcome, subprocess utils
 │   ├── claude_code.rs
 │   └── dry_run.rs
@@ -483,7 +489,7 @@ tests/               integration tests
 
 ### Filing issues
 
-Include `pitboss --version`, the relevant snippet from `pitboss.toml`, and the failing log under `.pitboss/logs/`. For runner halts, the phase id and the halt reason from `pitboss status` are usually enough to start.
+Include `pitboss --version`, the relevant snippet from `.pitboss/config.toml`, and the failing log under `.pitboss/play/logs/`. For runner halts, the phase id and the halt reason from `pitboss status` are usually enough to start.
 
 ### Commits and PRs
 
