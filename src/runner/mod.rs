@@ -1223,7 +1223,7 @@ mod tests {
             .with_timezone(&Utc);
         let state = fresh_run_state(&plan, &cfg, now);
         assert_eq!(state.run_id, "20260429T143022Z");
-        assert_eq!(state.branch, "pitboss/run-20260429T143022Z");
+        assert_eq!(state.branch, "pitboss/play/20260429T143022Z");
         assert_eq!(state.started_phase, pid("01"));
         assert_eq!(state.started_at, now);
         assert!(state.completed.is_empty());

@@ -71,7 +71,7 @@ enabled = true
 small_fix_line_limit = 30
 
 [git]
-branch_prefix = \"pitboss/run-\"
+branch_prefix = \"pitboss/play/\"
 create_pr = false
 
 # Caveman mode: opt-in terse-output directive prepended to every agent

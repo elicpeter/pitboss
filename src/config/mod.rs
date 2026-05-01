@@ -149,7 +149,7 @@ impl Default for AuditConfig {
 #[serde(default)]
 pub struct GitConfig {
     /// Prefix prepended to the per-run branch name. The full branch is
-    /// `<branch_prefix><utc_timestamp>` (e.g., `pitboss/run-20260429T143022Z`).
+    /// `<branch_prefix><utc_timestamp>` (e.g., `pitboss/play/20260429T143022Z`).
     pub branch_prefix: String,
     /// When `true`, the runner shells out to `gh pr create` after the final
     /// phase commits. Equivalent to passing `--pr` on the CLI.
@@ -159,7 +159,7 @@ pub struct GitConfig {
 impl Default for GitConfig {
     fn default() -> Self {
         Self {
-            branch_prefix: "pitboss/run-".to_string(),
+            branch_prefix: "pitboss/play/".to_string(),
             create_pr: false,
         }
     }
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(cfg.retries.max_phase_attempts, 3);
         assert!(cfg.audit.enabled);
         assert_eq!(cfg.audit.small_fix_line_limit, 30);
-        assert_eq!(cfg.git.branch_prefix, "pitboss/run-");
+        assert_eq!(cfg.git.branch_prefix, "pitboss/play/");
         assert!(!cfg.git.create_pr);
         assert!(cfg.tests.command.is_none());
         // Budget enforcement disabled by default; default pricing table covers
@@ -836,7 +836,7 @@ create_pr = true
         // Specified field took effect.
         assert!(cfg.git.create_pr);
         // Untouched field within the same section stays at default.
-        assert_eq!(cfg.git.branch_prefix, "pitboss/run-");
+        assert_eq!(cfg.git.branch_prefix, "pitboss/play/");
         // Whole sections missing → defaults.
         assert_eq!(cfg.models, ModelRoles::default());
         assert_eq!(cfg.retries, RetryBudgets::default());

@@ -214,8 +214,8 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
-            branch_name("pitboss/run-", at),
-            "pitboss/run-20260429T143022Z"
+            branch_name("pitboss/play/", at),
+            "pitboss/play/20260429T143022Z"
         );
         assert_eq!(branch_name("", at), "20260429T143022Z");
     }

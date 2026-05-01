@@ -844,7 +844,7 @@ mod tests {
     fn fresh_state() -> RunState {
         RunState::new(
             "20260430T120000Z",
-            "pitboss/run-20260430T120000Z",
+            "pitboss/play/20260430T120000Z",
             pid("01"),
         )
     }

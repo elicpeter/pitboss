@@ -2,7 +2,7 @@
 source: src/tui/app.rs
 expression: snap
 ---
-pitboss  run 20260430T120000Z  branch pitboss/run-20260430T120000Z                                                      
+pitboss  run 20260430T120000Z  branch pitboss/play/20260430T120000Z                                                     
 phase 02 — Domain types   [implementer]                                                                                 
 agent claude-code  model claude-opus-4-7                                                                                
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
