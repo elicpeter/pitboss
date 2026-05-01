@@ -7,15 +7,16 @@
 //! the run branch (`pitboss/grind/<run-id>`), wires up Ctrl-C handling, and
 //! drives the runner to completion.
 //!
-//! Phase 07 ships the sequential MVP only — `--max-iterations`, `--until`,
-//! `--max-cost`, `--max-tokens`, `--resume`, `--pr`, `--tui`, and hook
-//! execution land in phases 08-13.
+//! Phase 07 shipped the sequential MVP. Phase 08 adds the run-wide budgets
+//! (`--max-iterations`, `--until`, `--max-cost`, `--max-tokens`) and the
+//! documented [`crate::grind::ExitCode`] policy.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Utc};
 use clap::Args;
 use tokio::signal;
 use tracing::{info, warn};
@@ -24,8 +25,9 @@ use crate::agent::{self, Agent};
 use crate::config::{self, Config};
 use crate::git::{Git, ShellGit};
 use crate::grind::{
-    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, run_branch_name,
-    DiscoveryOptions, GrindPlan, GrindRunner, GrindShutdown, GrindStopReason, PromptDoc, RunDir,
+    default_plan_from_dir, discover_prompts, generate_run_id, load_plan, resolve_budgets,
+    run_branch_name, DiscoveryOptions, ExitCode, GrindPlan, GrindRunner, GrindShutdown,
+    GrindStopReason, PlanBudgets, PromptDoc, RunDir, SessionRecord, SessionStatus,
 };
 use crate::style::{self, col};
 
@@ -48,23 +50,78 @@ pub struct GrindArgs {
     /// resolved configuration before kicking off a long run.
     #[arg(long = "dry-run")]
     pub dry_run: bool,
+    /// Stop after this many sessions have been dispatched. Overrides
+    /// `[grind.budgets] max_iterations` from `pitboss.toml` and the plan's
+    /// `PlanBudgets`.
+    #[arg(long = "max-iterations", value_name = "N")]
+    pub max_iterations: Option<u32>,
+    /// RFC 3339 wall-clock cutoff. Once `Utc::now() >= until` the runner
+    /// finishes any in-flight session and exits with code 3. Overrides
+    /// `[grind.budgets] until` from `pitboss.toml` and the plan's
+    /// `PlanBudgets`.
+    #[arg(long = "until", value_name = "RFC3339", value_parser = parse_rfc3339)]
+    pub until: Option<DateTime<Utc>>,
+    /// Hard cap on cumulative agent cost in USD. Computed from
+    /// `[budgets.pricing]`. Overrides the corresponding `[grind.budgets]` /
+    /// plan field.
+    #[arg(long = "max-cost", value_name = "USD")]
+    pub max_cost: Option<f64>,
+    /// Hard cap on cumulative tokens (input + output) across all roles.
+    /// Overrides the corresponding `[grind.budgets]` / plan field.
+    #[arg(long = "max-tokens", value_name = "N")]
+    pub max_tokens: Option<u64>,
 }
 
-/// Entry point invoked from `cli::dispatch`.
-pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<()> {
-    let config = config::load(&workspace)
-        .with_context(|| format!("grind: loading config in {:?}", workspace))?;
-    let prompts = load_prompts(&workspace, &config, args.prompts_dir.as_deref())?;
-    let plan = resolve_plan(&workspace, &config, args.plan.as_deref(), &prompts)?;
-    plan.validate_against(&prompts)
-        .with_context(|| format!("grind: validating plan {:?}", plan.name))?;
+fn parse_rfc3339(s: &str) -> std::result::Result<DateTime<Utc>, String> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| format!("not a valid RFC 3339 timestamp ({e}): {s:?}"))
+}
 
-    if args.dry_run {
-        return print_dry_run_summary(&workspace, &config, &plan, &prompts);
+/// Entry point invoked from `cli::dispatch`. Returns an [`ExitCode`] mapping
+/// to the documented `pitboss grind` exit policy. Setup errors that happen
+/// before any session is dispatched surface as
+/// [`ExitCode::FailedToStart`] with a stderr message.
+pub async fn run(workspace: PathBuf, args: GrindArgs) -> Result<ExitCode> {
+    let config = match config::load(&workspace) {
+        Ok(c) => c,
+        Err(e) => {
+            print_failed_to_start(&format!("loading config: {e:#}"));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+    let prompts = match load_prompts(&workspace, &config, args.prompts_dir.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            print_failed_to_start(&format!("{e:#}"));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+    let plan = match resolve_plan(&workspace, &config, args.plan.as_deref(), &prompts) {
+        Ok(p) => p,
+        Err(e) => {
+            print_failed_to_start(&format!("{e:#}"));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+    if let Err(e) = plan.validate_against(&prompts) {
+        print_failed_to_start(&format!("validating plan {:?}: {e:#}", plan.name));
+        return Ok(ExitCode::FailedToStart);
     }
 
-    let agent = agent::build_agent(&config)?;
-    execute(workspace, config, plan, prompts, agent).await
+    if args.dry_run {
+        print_dry_run_summary(&workspace, &config, &plan, &prompts)?;
+        return Ok(ExitCode::Success);
+    }
+
+    let agent = match agent::build_agent(&config) {
+        Ok(a) => a,
+        Err(e) => {
+            print_failed_to_start(&format!("building agent: {e:#}"));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+    execute(workspace, config, plan, prompts, agent, &args).await
 }
 
 async fn execute<A>(
@@ -73,7 +130,8 @@ async fn execute<A>(
     plan: GrindPlan,
     prompts: Vec<PromptDoc>,
     agent: A,
-) -> Result<()>
+    args: &GrindArgs,
+) -> Result<ExitCode>
 where
     A: Agent + 'static,
 {
@@ -81,18 +139,37 @@ where
     let branch = run_branch_name(&run_id);
 
     let git = ShellGit::new(workspace.clone());
-    git.create_branch(&branch).await.with_context(|| {
-        format!(
-            "grind: creating run branch {:?} (workspace must be a git repo)",
+    if let Err(e) = git.create_branch(&branch).await {
+        print_failed_to_start(&format!(
+            "creating run branch {:?} (workspace must be a git repo): {e:#}",
             branch
-        )
-    })?;
-    git.checkout(&branch)
-        .await
-        .with_context(|| format!("grind: checking out {:?}", branch))?;
+        ));
+        return Ok(ExitCode::FailedToStart);
+    }
+    if let Err(e) = git.checkout(&branch).await {
+        print_failed_to_start(&format!("checking out {:?}: {e:#}", branch));
+        return Ok(ExitCode::FailedToStart);
+    }
 
-    let run_dir = RunDir::create(&workspace, &run_id)
-        .with_context(|| format!("grind: creating run directory for {run_id}"))?;
+    let run_dir = match RunDir::create(&workspace, &run_id) {
+        Ok(d) => d,
+        Err(e) => {
+            print_failed_to_start(&format!("creating run directory for {run_id}: {e:#}"));
+            return Ok(ExitCode::FailedToStart);
+        }
+    };
+
+    // Layer the budget sources so a CLI flag wins over `[grind.budgets]`
+    // which wins over the plan's `PlanBudgets`. Order docs in
+    // `crate::grind::resolve_budgets`.
+    let cli_budgets = PlanBudgets {
+        max_iterations: args.max_iterations,
+        until: args.until,
+        max_tokens: args.max_tokens,
+        max_cost_usd: args.max_cost,
+    };
+    let budgets = resolve_budgets(&config.grind.budgets, &plan.budgets, &cli_budgets);
+    let consecutive_failure_limit = config.grind.consecutive_failure_limit;
 
     let prompts_map = into_lookup(prompts);
     let runner_git = ShellGit::new(workspace.clone());
@@ -106,6 +183,8 @@ where
         run_dir,
         agent,
         runner_git,
+        budgets,
+        consecutive_failure_limit,
     );
 
     let shutdown = GrindShutdown::new();
@@ -119,12 +198,34 @@ where
     let _ = signal_task.await;
 
     let outcome = result?;
-    announce_finish(&outcome.run_id, &outcome.branch, outcome.stop_reason, outcome.sessions.len());
+    announce_finish(
+        &outcome.run_id,
+        &outcome.branch,
+        &outcome.stop_reason,
+        outcome.sessions.len(),
+    );
 
-    if outcome.stop_reason == GrindStopReason::Aborted {
-        bail!("grind run {} aborted by signal", outcome.run_id);
+    Ok(classify_outcome(&outcome.stop_reason, &outcome.sessions))
+}
+
+/// Map a grind run's [`GrindStopReason`] plus its session list to the
+/// documented [`ExitCode`]. Public for the integration test crate.
+pub fn classify_outcome(stop_reason: &GrindStopReason, sessions: &[SessionRecord]) -> ExitCode {
+    match stop_reason {
+        GrindStopReason::Aborted => ExitCode::Aborted,
+        GrindStopReason::BudgetExhausted(_) => ExitCode::BudgetExhausted,
+        GrindStopReason::ConsecutiveFailureLimit { .. } => ExitCode::ConsecutiveFailures,
+        GrindStopReason::Completed | GrindStopReason::Drained => {
+            if sessions
+                .iter()
+                .any(|r| matches!(r.status, SessionStatus::Error | SessionStatus::Timeout))
+            {
+                ExitCode::MixedFailures
+            } else {
+                ExitCode::Success
+            }
+        }
     }
-    Ok(())
 }
 
 fn load_prompts(
@@ -156,9 +257,7 @@ fn load_prompts(
         }
     }
     if discovered.prompts.is_empty() {
-        bail!(
-            "grind: no prompts discovered (run `pitboss prompts new <name>` to create one)"
-        );
+        bail!("grind: no prompts discovered (run `pitboss prompts new <name>` to create one)");
     }
     Ok(discovered.prompts)
 }
@@ -235,20 +334,43 @@ fn announce_abort() {
     );
 }
 
-fn announce_finish(run_id: &str, branch: &str, reason: GrindStopReason, sessions: usize) {
+fn announce_finish(run_id: &str, branch: &str, reason: &GrindStopReason, sessions: usize) {
     let c = style::use_color_stderr();
-    let label = match reason {
-        GrindStopReason::Completed => col(c, style::BOLD_GREEN, "completed"),
-        GrindStopReason::Drained => col(c, style::BOLD_YELLOW, "drained"),
-        GrindStopReason::Aborted => col(c, style::BOLD_RED, "aborted"),
+    let (label, suffix) = match reason {
+        GrindStopReason::Completed => (col(c, style::BOLD_GREEN, "completed"), String::new()),
+        GrindStopReason::Drained => (col(c, style::BOLD_YELLOW, "drained"), String::new()),
+        GrindStopReason::Aborted => (col(c, style::BOLD_RED, "aborted"), String::new()),
+        GrindStopReason::BudgetExhausted(reason) => (
+            col(c, style::BOLD_YELLOW, "BudgetExhausted"),
+            format!(" ({reason})"),
+        ),
+        GrindStopReason::ConsecutiveFailureLimit { limit } => (
+            col(c, style::BOLD_RED, "consecutive-failure-limit"),
+            format!(" (limit={limit})"),
+        ),
     };
     eprintln!(
-        "{} grind run {} {} after {} session(s) on {}",
+        "{} grind run {} {}{} after {} session(s) on {}",
         col(c, style::BOLD_CYAN, "[pitboss]"),
         col(c, style::BOLD_WHITE, run_id),
         label,
+        suffix,
         sessions,
         col(c, style::CYAN, branch),
+    );
+    // The spec requires a final `BudgetExhausted` log line so log scrapers
+    // and supervising scripts have a stable string to match on.
+    if let GrindStopReason::BudgetExhausted(reason) = reason {
+        info!(run_id, %reason, "BudgetExhausted");
+    }
+}
+
+fn print_failed_to_start(message: &str) {
+    let c = style::use_color_stderr();
+    eprintln!(
+        "{} grind: {} (exit 4)",
+        col(c, style::BOLD_RED, "[pitboss]"),
+        message,
     );
 }
 

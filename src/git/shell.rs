@@ -290,9 +290,7 @@ impl Git for ShellGit {
         } else {
             // Still dirty: confirm by checking whether the stash list has a
             // matching message. Cheaper than re-running pathspec logic.
-            let stashes = self
-                .run_succeed("stash_list", &["stash", "list"])
-                .await?;
+            let stashes = self.run_succeed("stash_list", &["stash", "list"]).await?;
             Ok(stashes.stdout.contains(message))
         }
     }

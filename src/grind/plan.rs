@@ -251,19 +251,13 @@ pub fn parse_plan_str(raw: &str, name: String, display: &str) -> Result<GrindPla
         if entry.weight_override == Some(0) {
             return Err(PlanLoadError::Invalid {
                 path: display.to_string(),
-                message: format!(
-                    "prompts[{:?}].weight_override must be >= 1",
-                    entry.name
-                ),
+                message: format!("prompts[{:?}].weight_override must be >= 1", entry.name),
             });
         }
         if entry.every_override == Some(0) {
             return Err(PlanLoadError::Invalid {
                 path: display.to_string(),
-                message: format!(
-                    "prompts[{:?}].every_override must be >= 1",
-                    entry.name
-                ),
+                message: format!("prompts[{:?}].every_override must be >= 1", entry.name),
             });
         }
     }
@@ -454,10 +448,7 @@ weight_override = 0
         let err = parse(raw, "p").unwrap_err();
         match err {
             PlanLoadError::Invalid { message, .. } => {
-                assert!(
-                    message.contains("weight_override"),
-                    "msg: {message}"
-                );
+                assert!(message.contains("weight_override"), "msg: {message}");
             }
             other => panic!("expected Invalid, got {other:?}"),
         }
@@ -473,10 +464,7 @@ every_override = 0
         let err = parse(raw, "p").unwrap_err();
         match err {
             PlanLoadError::Invalid { message, .. } => {
-                assert!(
-                    message.contains("every_override"),
-                    "msg: {message}"
-                );
+                assert!(message.contains("every_override"), "msg: {message}");
             }
             other => panic!("expected Invalid, got {other:?}"),
         }

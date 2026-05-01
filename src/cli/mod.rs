@@ -14,6 +14,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::grind::ExitCode;
+
 pub mod fold;
 pub mod grind;
 pub mod init;
@@ -129,25 +131,46 @@ pub enum Command {
 }
 
 /// Dispatch a parsed CLI invocation.
-pub async fn dispatch(cli: Cli) -> Result<()> {
+///
+/// Most subcommands return [`ExitCode::Success`] on success and surface
+/// failures through the `Err` channel; `pitboss grind` returns a richer
+/// [`ExitCode`] that maps to the documented `pitboss grind` exit-code policy
+/// (0 success, 1 mixed failures, 2 aborted, 3 budget hit, 4 failed to start,
+/// 5 consecutive-failure escape valve).
+pub async fn dispatch(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Init => init::run(std::env::current_dir()?),
+        Command::Init => {
+            init::run(std::env::current_dir()?)?;
+            Ok(ExitCode::Success)
+        }
         Command::Plan {
             goal,
             force,
             interview,
-        } => plan::run(std::env::current_dir()?, goal, force, interview).await,
-        Command::Play { tui, pr, dry_run } => {
-            play::run(std::env::current_dir()?, tui, pr, dry_run).await
+        } => {
+            plan::run(std::env::current_dir()?, goal, force, interview).await?;
+            Ok(ExitCode::Success)
         }
-        Command::Status => status::run(std::env::current_dir()?),
+        Command::Play { tui, pr, dry_run } => {
+            play::run(std::env::current_dir()?, tui, pr, dry_run).await?;
+            Ok(ExitCode::Success)
+        }
+        Command::Status => {
+            status::run(std::env::current_dir()?)?;
+            Ok(ExitCode::Success)
+        }
         Command::Rebuy { tui, pr, dry_run } => {
-            rebuy::run(std::env::current_dir()?, tui, pr, dry_run).await
+            rebuy::run(std::env::current_dir()?, tui, pr, dry_run).await?;
+            Ok(ExitCode::Success)
         }
         Command::Fold { checkout_original } => {
-            fold::run(std::env::current_dir()?, checkout_original).await
+            fold::run(std::env::current_dir()?, checkout_original).await?;
+            Ok(ExitCode::Success)
         }
-        Command::Prompts(args) => prompts::run(std::env::current_dir()?, args),
+        Command::Prompts(args) => {
+            prompts::run(std::env::current_dir()?, args)?;
+            Ok(ExitCode::Success)
+        }
         Command::Grind(args) => grind::run(std::env::current_dir()?, args).await,
     }
 }

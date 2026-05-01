@@ -1,14 +1,19 @@
-use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use pitboss::cli::{self, Cli};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     init_tracing(&cli);
-    cli::dispatch(cli).await
+    match cli::dispatch(cli).await {
+        Ok(code) => code.into_process(),
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 /// Configure `tracing-subscriber` from the CLI flags and environment.

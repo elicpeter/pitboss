@@ -33,7 +33,8 @@ use crate::git::{CommitId, Git};
 use crate::state::TokenUsage;
 use crate::tests as project_tests;
 
-use super::plan::GrindPlan;
+use super::budget::{session_cost_usd, BudgetCheck, BudgetReason, BudgetTracker};
+use super::plan::{GrindPlan, PlanBudgets};
 use super::prompt::PromptDoc;
 use super::run_dir::{RunDir, SessionRecord, SessionStatus};
 use super::scheduler::Scheduler;
@@ -122,7 +123,7 @@ impl Default for GrindShutdown {
 }
 
 /// Why a [`GrindRunner::run`] call returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GrindStopReason {
     /// The scheduler had no further prompts to dispatch.
     Completed,
@@ -132,6 +133,15 @@ pub enum GrindStopReason {
     /// The abort signal fired during a session; the session was recorded as
     /// [`SessionStatus::Aborted`].
     Aborted,
+    /// A run-level budget tripped. Carries the exhausted reason for log /
+    /// CLI output.
+    BudgetExhausted(BudgetReason),
+    /// The consecutive-failure escape valve fired (see
+    /// [`crate::config::GrindConfig::consecutive_failure_limit`]).
+    ConsecutiveFailureLimit {
+        /// The configured limit that was just reached.
+        limit: u32,
+    },
 }
 
 /// Outcome of a full [`GrindRunner::run`] invocation.
@@ -159,11 +169,21 @@ pub struct GrindRunner<A: Agent, G: Git> {
     agent: A,
     git: G,
     next_seq: u32,
+    budgets: PlanBudgets,
+    consecutive_failure_limit: u32,
 }
 
 impl<A: Agent, G: Git> GrindRunner<A, G> {
     /// Build a runner ready to dispatch its first session. Caller has already
     /// created the per-run branch and checked it out.
+    ///
+    /// `budgets` holds the run-wide caps already resolved from
+    /// `pitboss.toml`'s `[grind.budgets]`, the plan's `PlanBudgets`, and any
+    /// CLI overrides via [`crate::grind::resolve_budgets`].
+    /// `consecutive_failure_limit` defaults to
+    /// [`crate::config::GrindConfig::consecutive_failure_limit`] (`3`) and
+    /// trips [`GrindStopReason::ConsecutiveFailureLimit`] once that many
+    /// failed sessions land in a row.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         workspace: PathBuf,
@@ -175,6 +195,8 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         run_dir: RunDir,
         agent: A,
         git: G,
+        budgets: PlanBudgets,
+        consecutive_failure_limit: u32,
     ) -> Self {
         let scheduler = Scheduler::new(plan.clone(), prompts);
         Self {
@@ -188,6 +210,8 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             agent,
             git,
             next_seq: 1,
+            budgets,
+            consecutive_failure_limit,
         }
     }
 
@@ -211,10 +235,12 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         &self.plan
     }
 
-    /// Drive the loop. Returns once the scheduler exhausts, drain trips, or
-    /// abort trips.
+    /// Drive the loop. Returns once the scheduler exhausts, drain trips,
+    /// abort trips, a run-level budget exhausts, or the consecutive-failure
+    /// limit is reached.
     pub async fn run(&mut self, shutdown: GrindShutdown) -> Result<GrindRunOutcome> {
         let mut sessions: Vec<SessionRecord> = Vec::new();
+        let mut tracker = BudgetTracker::new(self.budgets.clone(), self.consecutive_failure_limit);
         let mut stop_reason = GrindStopReason::Completed;
 
         loop {
@@ -224,6 +250,19 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
                 } else {
                     GrindStopReason::Drained
                 };
+                break;
+            }
+
+            // Pre-flight budget check so we never start a session that would
+            // immediately blow a cap that was already reached by a previous
+            // session.
+            if let BudgetCheck::Exhausted(reason) = tracker.check() {
+                info!(
+                    run_id = %self.run_id,
+                    reason = %reason,
+                    "grind: BudgetExhausted (pre-dispatch)"
+                );
+                stop_reason = GrindStopReason::BudgetExhausted(reason);
                 break;
             }
 
@@ -242,13 +281,37 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
 
             let record = self.run_session(seq, &prompt, &shutdown).await?;
             self.scheduler.record_run(&prompt.meta.name);
-            self.run_dir.log().append(&record).with_context(|| {
-                format!("grind: appending session {seq} record to log")
-            })?;
+            self.run_dir
+                .log()
+                .append(&record)
+                .with_context(|| format!("grind: appending session {seq} record to log"))?;
+            tracker.record_session(&record);
             sessions.push(record.clone());
 
             if record.status == SessionStatus::Aborted {
                 stop_reason = GrindStopReason::Aborted;
+                break;
+            }
+
+            if tracker.consecutive_failure_limit_reached() {
+                warn!(
+                    run_id = %self.run_id,
+                    limit = self.consecutive_failure_limit,
+                    "grind: consecutive-failure limit reached"
+                );
+                stop_reason = GrindStopReason::ConsecutiveFailureLimit {
+                    limit: self.consecutive_failure_limit,
+                };
+                break;
+            }
+
+            if let BudgetCheck::Exhausted(reason) = tracker.check() {
+                info!(
+                    run_id = %self.run_id,
+                    reason = %reason,
+                    "grind: BudgetExhausted"
+                );
+                stop_reason = GrindStopReason::BudgetExhausted(reason);
                 break;
             }
         }
@@ -271,10 +334,11 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         let transcript_path = self.run_dir.paths().transcript_for(seq);
         let transcript_rel = relative_to(&self.workspace, &transcript_path);
 
-        let summary_path = self.run_dir.paths().root.join(format!(
-            ".pitboss-summary-{:04}.txt",
-            seq
-        ));
+        let summary_path = self
+            .run_dir
+            .paths()
+            .root
+            .join(format!(".pitboss-summary-{:04}.txt", seq));
         // Make sure the summary path is empty so a stale value from a prior
         // session can never be misread as the agent's current output.
         let _ = std::fs::remove_file(&summary_path);
@@ -316,9 +380,10 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_SESSION_TIMEOUT);
 
+        let model = self.config.models.implementer.clone();
         let request = AgentRequest {
             role: Role::Implementer,
-            model: self.config.models.implementer.clone(),
+            model: model.clone(),
             system_prompt: String::new(),
             user_prompt,
             workdir: self.workspace.clone(),
@@ -327,7 +392,38 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             env,
         };
 
-        let dispatch = self.dispatch_agent(request, shutdown.cancel_token()).await?;
+        // Outer wall-clock guard. The agent itself honors `request.timeout`
+        // (subprocess kill, etc.), but a misbehaving or stub agent might not
+        // — wrapping the dispatch in `tokio::time::timeout` makes the cap
+        // enforceable from pitboss's side. A timeout drops the agent future,
+        // which cancels the underlying subprocess by destruction, and we
+        // synthesize a `Timeout` outcome so the session record reflects what
+        // happened.
+        let mut summary_override: Option<String> = None;
+        let dispatch = match tokio::time::timeout(
+            timeout,
+            self.dispatch_agent(request, shutdown.cancel_token()),
+        )
+        .await
+        {
+            Ok(res) => res?,
+            Err(_) => {
+                warn!(
+                    run_id = %self.run_id,
+                    seq,
+                    timeout_secs = timeout.as_secs(),
+                    "grind: per-prompt timeout fired"
+                );
+                summary_override = Some(format!(
+                    "session exceeded max_session_seconds ({}s)",
+                    timeout.as_secs()
+                ));
+                AgentDispatch {
+                    stop_reason: StopReason::Timeout,
+                    tokens: TokenUsage::default(),
+                }
+            }
+        };
         let ended_at = Utc::now();
 
         let mut status = match &dispatch.stop_reason {
@@ -337,7 +433,40 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             StopReason::Error(_) => SessionStatus::Error,
         };
 
-        let summary = read_summary_or_fallback(&summary_path);
+        let cost_usd = session_cost_usd(
+            &self.config,
+            &model,
+            dispatch.tokens.input,
+            dispatch.tokens.output,
+        );
+
+        // Post-hoc cost cap. The agent can't know its rolling spend during a
+        // dispatch, so the per-prompt cost limit fires after the session
+        // completes: if the final cost is over the cap, the session is
+        // recorded as `Error` with a clear summary rather than letting the
+        // agent's own report stand.
+        if status == SessionStatus::Ok {
+            if let Some(cap) = prompt.meta.max_session_cost_usd {
+                if cost_usd > cap {
+                    warn!(
+                        run_id = %self.run_id,
+                        seq,
+                        cost = cost_usd,
+                        cap,
+                        "grind: per-prompt max_session_cost_usd exceeded"
+                    );
+                    status = SessionStatus::Error;
+                    summary_override = Some(format!(
+                        "session exceeded max_session_cost_usd: ${cost_usd:.4} > ${cap:.4}"
+                    ));
+                }
+            }
+        }
+
+        let summary = match summary_override {
+            Some(s) => s,
+            None => read_summary_or_fallback(&summary_path),
+        };
 
         if status == SessionStatus::Ok && prompt.meta.verify {
             status = self.verify_session(seq, prompt, &transcript_path).await?;
@@ -399,7 +528,7 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             summary: Some(summary),
             commit,
             tokens: dispatch.tokens,
-            cost_usd: 0.0,
+            cost_usd,
             transcript_path: transcript_rel,
         })
     }
@@ -407,11 +536,7 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
     /// Commit any code changes the session produced. Returns the new commit
     /// id, or `None` if there was nothing code-side to commit (e.g., the
     /// agent only edited `.pitboss/`).
-    async fn try_commit_session(
-        &self,
-        seq: u32,
-        prompt: &PromptDoc,
-    ) -> Result<Option<CommitId>> {
+    async fn try_commit_session(&self, seq: u32, prompt: &PromptDoc) -> Result<Option<CommitId>> {
         // `.pitboss/` is excluded the same way `pitboss play` does — sessions.jsonl
         // and friends live under there and would otherwise pollute every grind
         // commit.
@@ -433,9 +558,7 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
 
         let message = format!(
             "[pitboss/grind] {} session-{:04} ({})",
-            prompt.meta.name,
-            seq,
-            self.run_id,
+            prompt.meta.name, seq, self.run_id,
         );
         let id = self
             .git
@@ -454,7 +577,8 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
         prompt: &PromptDoc,
         transcript_path: &Path,
     ) -> Result<SessionStatus> {
-        let Some(runner) = project_tests::detect(&self.workspace, self.config.tests.command.as_deref())
+        let Some(runner) =
+            project_tests::detect(&self.workspace, self.config.tests.command.as_deref())
         else {
             debug!(
                 seq,
@@ -517,9 +641,7 @@ impl<A: Agent, G: Git> GrindRunner<A, G> {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
             Err(e) => {
-                return Err(
-                    anyhow::Error::new(e).context(format!("grind: reading {:?}", path))
-                )
+                return Err(anyhow::Error::new(e).context(format!("grind: reading {:?}", path)))
             }
         };
         Ok(tail_lines(&raw, SESSION_LOG_TAIL_LINES))

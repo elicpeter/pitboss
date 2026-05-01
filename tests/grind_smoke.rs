@@ -21,8 +21,8 @@ use pitboss::agent::{Agent, AgentEvent, AgentOutcome, AgentRequest, StopReason};
 use pitboss::config::Config;
 use pitboss::git::{Git, ShellGit};
 use pitboss::grind::{
-    default_plan_from_dir, GrindRunner, GrindShutdown, GrindStopReason, PromptDoc, PromptMeta,
-    PromptSource, RunDir, SessionStatus,
+    default_plan_from_dir, GrindRunner, GrindShutdown, GrindStopReason, PlanBudgets, PromptDoc,
+    PromptMeta, PromptSource, RunDir, SessionStatus,
 };
 
 const RUN_ID: &str = "20260430T180000Z-test";
@@ -78,7 +78,10 @@ impl Agent for MockAgent {
                 .unwrap_or_else(|| panic!("env var {key} missing on dispatch {n}"));
             assert!(!val.is_empty(), "env var {key} empty on dispatch {n}");
         }
-        assert_eq!(req.env.get("PITBOSS_RUN_ID").map(String::as_str), Some(self.expected_run_id.as_str()));
+        assert_eq!(
+            req.env.get("PITBOSS_RUN_ID").map(String::as_str),
+            Some(self.expected_run_id.as_str())
+        );
 
         let prompt_name = req.env.get("PITBOSS_PROMPT_NAME").unwrap().clone();
         let seq = req.env.get("PITBOSS_SESSION_SEQ").unwrap().clone();
@@ -88,8 +91,7 @@ impl Agent for MockAgent {
         // session adds one labeled line so the scratchpad accumulates over
         // the run.
         let scratchpad_path = PathBuf::from(req.env.get("PITBOSS_SCRATCHPAD").unwrap());
-        let mut existing =
-            fs::read_to_string(&scratchpad_path).unwrap_or_default();
+        let mut existing = fs::read_to_string(&scratchpad_path).unwrap_or_default();
         existing.push_str(&format!("- session {seq} ({prompt_name})\n"));
         fs::write(&scratchpad_path, existing).expect("write scratchpad");
 
@@ -218,10 +220,7 @@ async fn make_runner(
     workspace: &Path,
     branch: &str,
     invocations: Arc<AtomicU32>,
-) -> (
-    GrindRunner<MockAgent, ShellGit>,
-    pitboss::grind::SessionLog,
-) {
+) -> (GrindRunner<MockAgent, ShellGit>, pitboss::grind::SessionLog) {
     init_git_repo(workspace);
     let git = ShellGit::new(workspace);
     git.create_branch(branch).await.unwrap();
@@ -246,6 +245,8 @@ async fn make_runner(
         run_dir,
         MockAgent::new(invocations, RUN_ID),
         runner_git,
+        PlanBudgets::default(),
+        3,
     );
     (runner, log)
 }

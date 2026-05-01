@@ -600,8 +600,13 @@ impl App {
     }
 
     fn render_output(&self, frame: &mut Frame, area: Rect) {
-        // Show the last N lines that fit in the pane (subtract the borders).
+        // Each raw line wraps to >=1 visual rows, so the last `inner_height`
+        // raw lines always cover the visible pane. Take that slice as our
+        // candidate set, then use `line_count` plus `scroll` to anchor the
+        // most recent visual rows to the bottom (otherwise wrapped lines push
+        // the latest output off the bottom edge and clip it).
         let inner_height = area.height.saturating_sub(2) as usize;
+        let inner_width = area.width.saturating_sub(2);
         let take = inner_height.max(1);
         let start = self.output.len().saturating_sub(take);
         let lines: Vec<Line> = self
@@ -628,6 +633,13 @@ impl App {
         let para = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false });
+        // line_count returns wrapped content rows + the block's top/bottom
+        // borders (2 with Borders::ALL). Subtract those to get content rows,
+        // then scroll past whatever doesn't fit so the tail stays visible.
+        let total_with_borders = para.line_count(inner_width);
+        let content_rows = total_with_borders.saturating_sub(2);
+        let scroll_y = u16::try_from(content_rows.saturating_sub(inner_height)).unwrap_or(u16::MAX);
+        let para = para.scroll((scroll_y, 0));
         frame.render_widget(para, area);
     }
 
@@ -1043,6 +1055,37 @@ mod tests {
         app.handle_event(Event::TestStarted);
         // Tests don't dispatch a role; chip falls back to implementer.
         assert_eq!(app.current_model(), "claude-opus-4-7");
+    }
+
+    #[test]
+    fn render_keeps_latest_line_visible_when_earlier_lines_wrap() {
+        // Regression: a wrapping line near the bottom of the output pane used
+        // to push the most recent lines off the bottom edge, making them
+        // invisible — looked like the view had scrolled up by accident.
+        let started_at = fixed_started_at();
+        let mut app = App::new(
+            three_phase_plan(),
+            fresh_state_at(started_at),
+            fixture_agent(),
+            fixture_usage_view(),
+        );
+        app.set_now(started_at);
+        // Push enough single-line entries to fill the pane, plus a long line
+        // partway down that is guaranteed to wrap at the output pane's width.
+        for i in 0..12 {
+            app.handle_event(Event::AgentStdout(format!("line {i}")));
+        }
+        app.handle_event(Event::AgentStdout(
+            "LONGWORD ".repeat(40).trim_end().to_string(),
+        ));
+        app.handle_event(Event::AgentStdout("MIDDLE".into()));
+        app.handle_event(Event::AgentStdout("LATEST".into()));
+
+        let snap = render_to_string(&app, 80, 20);
+        // Both of the most recent entries must be in the rendered frame, even
+        // though the wrapping LONGWORD line consumed extra visual rows.
+        assert!(snap.contains("LATEST"), "rendered frame:\n{snap}");
+        assert!(snap.contains("MIDDLE"), "rendered frame:\n{snap}");
     }
 
     #[test]

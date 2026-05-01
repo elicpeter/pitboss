@@ -10,6 +10,7 @@
 //!
 //! Phases 01-02 stand up the data model and discovery. The CLI is not yet wired.
 
+pub mod budget;
 pub mod discovery;
 pub mod plan;
 pub mod prompt;
@@ -18,6 +19,9 @@ pub mod run_dir;
 pub mod scheduler;
 pub mod templates;
 
+pub use budget::{
+    resolve_budgets, session_cost_usd, BudgetCheck, BudgetReason, BudgetTracker, ExitCode,
+};
 pub use discovery::{
     discover_prompts, resolve_home_prompts_dir, DiscoveryOptions, DiscoveryResult,
 };
@@ -30,8 +34,8 @@ pub use prompt::{
     PromptSource,
 };
 pub use run::{
-    compose_user_prompt, run_branch_name, standing_instruction_block, GrindRunOutcome,
-    GrindRunner, GrindShutdown, GrindStopReason,
+    compose_user_prompt, run_branch_name, standing_instruction_block, GrindRunOutcome, GrindRunner,
+    GrindShutdown, GrindStopReason,
 };
 pub use run_dir::{
     generate_run_id, render_sessions_md, RunDir, RunPaths, Scratchpad, SessionLog, SessionRecord,

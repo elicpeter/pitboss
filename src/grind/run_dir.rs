@@ -190,12 +190,10 @@ impl SessionLog {
                         self.paths.sessions_jsonl
                     )
                 })?;
-            f.write_all(line.as_bytes()).with_context(|| {
-                format!("session log: writing {:?}", self.paths.sessions_jsonl)
-            })?;
-            f.sync_data().with_context(|| {
-                format!("session log: fsync {:?}", self.paths.sessions_jsonl)
-            })?;
+            f.write_all(line.as_bytes())
+                .with_context(|| format!("session log: writing {:?}", self.paths.sessions_jsonl))?;
+            f.sync_data()
+                .with_context(|| format!("session log: fsync {:?}", self.paths.sessions_jsonl))?;
         }
 
         let records = self.read_records_locked()?;
@@ -262,11 +260,13 @@ pub fn render_sessions_md(records: &[SessionRecord]) -> String {
         ));
         out.push_str(&format!(
             "- started: {}\n",
-            r.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            r.started_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ));
         out.push_str(&format!(
             "- ended: {}\n",
-            r.ended_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            r.ended_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
         ));
         let secs = (r.ended_at - r.started_at).num_seconds().max(0);
         out.push_str(&format!("- duration: {secs}s\n"));
@@ -284,10 +284,7 @@ pub fn render_sessions_md(records: &[SessionRecord]) -> String {
             total, r.tokens.input, r.tokens.output
         ));
         out.push_str(&format!("- cost: ${:.4}\n", r.cost_usd));
-        out.push_str(&format!(
-            "- transcript: {}\n",
-            r.transcript_path.display()
-        ));
+        out.push_str(&format!("- transcript: {}\n", r.transcript_path.display()));
         match &r.summary {
             Some(s) if !s.is_empty() => {
                 out.push_str("- summary:\n\n");
@@ -346,10 +343,7 @@ impl RunDir {
     pub fn create(repo_root: &Path, run_id: &str) -> Result<Self> {
         let paths = RunPaths::for_run(repo_root, run_id);
         if paths.root.exists() {
-            return Err(anyhow!(
-                "grind run dir {:?} already exists",
-                paths.root
-            ));
+            return Err(anyhow!("grind run dir {:?} already exists", paths.root));
         }
         fs::create_dir_all(&paths.root)
             .with_context(|| format!("create_dir_all {:?}", paths.root))?;
@@ -371,16 +365,9 @@ impl RunDir {
     pub fn open(repo_root: &Path, run_id: &str) -> Result<Self> {
         let paths = RunPaths::for_run(repo_root, run_id);
         if !paths.root.is_dir() {
-            return Err(anyhow!(
-                "grind run dir {:?} does not exist",
-                paths.root
-            ));
+            return Err(anyhow!("grind run dir {:?} does not exist", paths.root));
         }
-        for required in [
-            &paths.sessions_jsonl,
-            &paths.sessions_md,
-            &paths.scratchpad,
-        ] {
+        for required in [&paths.sessions_jsonl, &paths.sessions_md, &paths.scratchpad] {
             if !required.exists() {
                 return Err(anyhow!(
                     "grind run dir {:?} is missing required file {:?}",
@@ -512,10 +499,7 @@ mod tests {
         let repo = tempdir().unwrap();
         RunDir::create(repo.path(), "rid").unwrap();
         let err = RunDir::create(repo.path(), "rid").unwrap_err();
-        assert!(
-            err.to_string().contains("already exists"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("already exists"), "got: {err}");
     }
 
     #[test]
@@ -600,10 +584,7 @@ mod tests {
         let mut seen: HashSet<String> = HashSet::new();
         for _ in 0..200 {
             let id = generate_run_id();
-            assert!(
-                id.contains('-'),
-                "run id should have a hex suffix: {id}"
-            );
+            assert!(id.contains('-'), "run id should have a hex suffix: {id}");
             let suffix = id.rsplit('-').next().unwrap();
             assert_eq!(suffix.len(), 4, "suffix should be 4 hex chars: {id}");
             assert!(
@@ -644,9 +625,7 @@ mod tests {
                     commit: None,
                     tokens: TokenUsage::default(),
                     cost_usd: 0.0,
-                    transcript_path: PathBuf::from(format!(
-                        "transcripts/session-{seq:04}.log"
-                    )),
+                    transcript_path: PathBuf::from(format!("transcripts/session-{seq:04}.log")),
                 };
                 log.append(&rec)
             }));
