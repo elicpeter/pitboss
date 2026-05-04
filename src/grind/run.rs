@@ -28,7 +28,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -540,6 +540,28 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
         let max_parallel = self.plan.max_parallel.max(1);
         let semaphore = Arc::new(Semaphore::new(max_parallel as usize));
         let mut tasks: JoinSet<Result<SessionRecord>> = JoinSet::new();
+
+        // Skip-file watcher: poll `.pitboss/skip` every 2 s. When found,
+        // cancel the current skip token (killing any in-flight sessions),
+        // swap in a fresh token for the next batch, then remove the file.
+        let skip_file = self.workspace.join(".pitboss/skip");
+        let skip_file_for_loop = skip_file.clone();
+        let current_skip: Arc<Mutex<CancellationToken>> =
+            Arc::new(Mutex::new(CancellationToken::new()));
+        let skip_holder = current_skip.clone();
+        let skip_watcher = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if tokio::fs::try_exists(&skip_file).await.unwrap_or(false) {
+                    let token = skip_holder.lock().unwrap().clone();
+                    token.cancel();
+                    *skip_holder.lock().unwrap() = CancellationToken::new();
+                    let _ = tokio::fs::remove_file(&skip_file).await;
+                }
+            }
+        });
         let mut max_completed_seq: u32 = self.next_seq.saturating_sub(1);
         let mut warn_flags = BudgetWarnFlags::default();
 
@@ -671,8 +693,16 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
                 parallel_safe: prompt.meta.parallel_safe,
             });
 
+            // No sessions in flight: any skip file left over from the previous
+            // session is stale. Rotate the token and delete it so it can't
+            // carry over and kill the session we're about to start.
+            if tasks.is_empty() {
+                let _ = tokio::fs::remove_file(&skip_file_for_loop).await;
+                *current_skip.lock().unwrap() = CancellationToken::new();
+            }
+            let skip_token = current_skip.lock().unwrap().clone();
             let input = self
-                .prepare_session_input(seq, prompt, permit, &shutdown)
+                .prepare_session_input(seq, prompt, permit, &shutdown, skip_token)
                 .await
                 .with_context(|| format!("grind: preparing session {seq}"))?;
             tasks.spawn(run_session_task(input));
@@ -717,6 +747,8 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
                 "grind: terminal state.json write failed"
             );
         }
+
+        skip_watcher.abort();
 
         let _ = self.events_tx.send(GrindEvent::RunFinished {
             stop_reason: stop_reason.clone(),
@@ -882,6 +914,7 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
         prompt: PromptDoc,
         permit: OwnedSemaphorePermit,
         shutdown: &GrindShutdown,
+        skip_token: CancellationToken,
     ) -> Result<SessionTaskInput<A, G>> {
         let transcript_path = self.run_dir.paths().transcript_for(seq);
         let summary_path = self
@@ -910,6 +943,10 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
             summary_path.display().to_string(),
         );
         base_env.insert("PITBOSS_SESSION_SEQ".into(), seq.to_string());
+        base_env.insert(
+            "PITBOSS_SKIP_FILE".into(),
+            self.workspace.join(".pitboss/skip").display().to_string(),
+        );
 
         let (workdir_for_agent, scratchpad_path_for_agent, worktree_opt) =
             if prompt.meta.parallel_safe {
@@ -971,6 +1008,7 @@ impl<A: Agent + 'static, G: Git + 'static> GrindRunner<A, G> {
             scratchpad_seed,
             base_env,
             events_tx: self.events_tx.clone(),
+            skip_token,
         })
     }
 
@@ -1051,6 +1089,10 @@ struct SessionTaskInput<A: Agent, G: Git> {
     /// Broadcast handle the session uses to publish [`GrindEvent`]s as the
     /// dispatch progresses. Cloned from the runner at task spawn.
     events_tx: broadcast::Sender<GrindEvent>,
+    /// Per-session cancel token wired to the `.pitboss/skip` file watcher.
+    /// Fires only for this session's lifetime; cancelling it does not stop
+    /// the run, it just skips this session and continues with the next prompt.
+    skip_token: CancellationToken,
 }
 
 /// Body of one dispatched session. Returns the resulting [`SessionRecord`];
@@ -1080,6 +1122,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
         scratchpad_seed,
         base_env,
         events_tx,
+        skip_token,
     } = input;
 
     let started_at = Utc::now();
@@ -1151,13 +1194,25 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
             env: base_env.clone(),
         };
 
+        // Child token fires on abort OR skip; the parent shutdown token's
+        // cancellation propagates automatically via child_token().
+        let session_cancel = shutdown.cancel_token().child_token();
+        {
+            let cancel_for_skip = session_cancel.clone();
+            let skip = skip_token.clone();
+            tokio::spawn(async move {
+                skip.cancelled().await;
+                cancel_for_skip.cancel();
+            });
+        }
+
         let mut summary_override: Option<String> = None;
         let dispatch = match tokio::time::timeout(
             timeout,
             dispatch_agent_with_events(
                 &*agent,
                 request,
-                shutdown.cancel_token(),
+                &session_cancel,
                 Some((events_tx.clone(), seq)),
             ),
         )
@@ -1186,7 +1241,13 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
         status = match &dispatch.stop_reason {
             StopReason::Completed => SessionStatus::Ok,
             StopReason::Timeout => SessionStatus::Timeout,
-            StopReason::Cancelled => SessionStatus::Aborted,
+            StopReason::Cancelled => {
+                if skip_token.is_cancelled() {
+                    SessionStatus::Skipped
+                } else {
+                    SessionStatus::Aborted
+                }
+            }
             StopReason::Error(_) => SessionStatus::Error,
         };
 
@@ -1283,7 +1344,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
             let pitboss_rel = Path::new(".pitboss");
             let sequential_exclusions: [&Path; 1] = [pitboss_rel];
             commit = match status {
-                SessionStatus::Ok | SessionStatus::Error => {
+                SessionStatus::Ok | SessionStatus::Error | SessionStatus::Skipped => {
                     try_commit_session(&*repo_git, seq, &prompt, &run_id, &sequential_exclusions)
                         .await?
                 }
@@ -1383,7 +1444,7 @@ async fn run_session_task<A: Agent + 'static, G: Git + 'static>(
     // hook_timeout_secs apiece — exactly the opposite of what the second
     // Ctrl-C asked for. Skip both kinds on Aborted; pre_session already ran
     // (or didn't) before the abort fired.
-    if status != SessionStatus::Aborted {
+    if status != SessionStatus::Aborted && status != SessionStatus::Skipped {
         let mut hook_env = base_env.clone();
         hook_env.insert("PITBOSS_SESSION_PROMPT".into(), prompt.meta.name.clone());
         hook_env.insert("PITBOSS_SESSION_STATUS".into(), status.as_str().to_string());

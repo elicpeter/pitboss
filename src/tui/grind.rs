@@ -855,6 +855,7 @@ pub fn format_session_row(row: &SessionRow, now: DateTime<Utc>) -> Line<'static>
         Some(SessionStatus::Timeout) => "t",
         Some(SessionStatus::Aborted) => "a",
         Some(SessionStatus::Dirty) => "~",
+        Some(SessionStatus::Skipped) => "s",
     };
     let glyph_style = match row.status {
         None => Style::default()
@@ -865,6 +866,7 @@ pub fn format_session_row(row: &SessionRow, now: DateTime<Utc>) -> Line<'static>
         Some(SessionStatus::Timeout) => Style::default().fg(Color::Yellow),
         Some(SessionStatus::Aborted) => Style::default().fg(Color::Yellow),
         Some(SessionStatus::Dirty) => Style::default().fg(Color::Yellow),
+        Some(SessionStatus::Skipped) => Style::default().fg(Color::DarkGray),
     };
     let id_style = match row.status {
         None => Style::default()
@@ -881,6 +883,7 @@ pub fn format_session_row(row: &SessionRow, now: DateTime<Utc>) -> Line<'static>
         Some(SessionStatus::Timeout) => Style::default().fg(Color::Yellow),
         Some(SessionStatus::Aborted) => Style::default().fg(Color::Yellow),
         Some(SessionStatus::Dirty) => Style::default().fg(Color::Yellow),
+        Some(SessionStatus::Skipped) => Style::default().fg(Color::DarkGray),
     };
     let parallel_marker = if row.parallel_safe { " *" } else { "" };
     let secs = row.duration_secs(now);

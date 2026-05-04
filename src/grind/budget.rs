@@ -202,7 +202,7 @@ impl BudgetTracker {
             SessionStatus::Error | SessionStatus::Timeout => {
                 self.consecutive_failures = self.consecutive_failures.saturating_add(1);
             }
-            SessionStatus::Aborted => {}
+            SessionStatus::Aborted | SessionStatus::Skipped => {}
         }
     }
 

@@ -98,6 +98,9 @@ pub enum SessionStatus {
     /// stashed into a labeled stash for morning triage. The work itself was
     /// otherwise valid; the dirty status is a hint that triage is needed.
     Dirty,
+    /// Session was killed by the `.pitboss/skip` file while in-flight. The
+    /// run continues with the next prompt; this is not counted as a failure.
+    Skipped,
 }
 
 impl SessionStatus {
@@ -110,6 +113,7 @@ impl SessionStatus {
             SessionStatus::Timeout => "timeout",
             SessionStatus::Aborted => "aborted",
             SessionStatus::Dirty => "dirty",
+            SessionStatus::Skipped => "skipped",
         }
     }
 }

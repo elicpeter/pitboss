@@ -447,7 +447,7 @@ pub fn reconstruct_state_from_log(
             SessionStatus::Error | SessionStatus::Timeout => {
                 budget.consecutive_failures = budget.consecutive_failures.saturating_add(1);
             }
-            SessionStatus::Aborted => {}
+            SessionStatus::Aborted | SessionStatus::Skipped => {}
         }
     }
 

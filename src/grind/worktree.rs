@@ -240,7 +240,10 @@ impl SessionWorktree {
         // overwritten by the incoming run-branch tip), the prompt
         // violated its `parallel_safe: true` claim — we mark the session
         // Error and skip the commit / merge entirely.
-        if status == SessionStatus::Ok || status == SessionStatus::Error {
+        if status == SessionStatus::Ok
+            || status == SessionStatus::Error
+            || status == SessionStatus::Skipped
+        {
             if let Err(e) = g.merge_ff_only(run_branch).await {
                 warn!(
                     run_id = %run_id,
@@ -267,7 +270,7 @@ impl SessionWorktree {
         let parallel_exclusions: [&Path; 2] = [pitboss_rel, scratchpad_rel];
         if sync_ok {
             commit = match status {
-                SessionStatus::Ok | SessionStatus::Error => {
+                SessionStatus::Ok | SessionStatus::Error | SessionStatus::Skipped => {
                     try_commit_session(g, self.seq, prompt, run_id, &parallel_exclusions).await?
                 }
                 _ => None,
